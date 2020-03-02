@@ -229,7 +229,7 @@ def test_create_health_check_with_domain_name():
             "Type": "HTTPS",
             "FullyQualifiedDomainName": "example.com",
             "Port": 443,
-            "ResourcePath": "/",
+            "ResourcePath": "/search?q=term&format=json",
         },
     )
 
@@ -239,7 +239,7 @@ def test_create_health_check_with_domain_name():
     config = check["HealthCheckConfig"]
     config["Port"].should.equal(443)
     config["Type"].should.equal("HTTPS")
-    config["ResourcePath"].should.equal("/")
+    config["ResourcePath"].should.equal("/search?q=term&format=json")
     config["FullyQualifiedDomainName"].should.equal("example.com")
     config["RequestInterval"].should.equal(30)
     config["FailureThreshold"].should.equal(3)

@@ -6,6 +6,7 @@ import string
 import random
 import uuid
 from jinja2 import Template
+from xml.sax.saxutils import escape
 
 from moto.core import BaseBackend, BaseModel
 
@@ -25,6 +26,7 @@ class HealthCheck(BaseModel):
         self.port = health_check_args.get("port", 80)
         self.type_ = health_check_args.get("type")
         self.resource_path = health_check_args.get("resource_path")
+        self.resource_path_xml = escape(health_check_args.get("resource_path"))
         self.fqdn = health_check_args.get("fqdn")
         self.search_string = health_check_args.get("search_string")
         self.request_interval = health_check_args.get("request_interval", 30)
@@ -63,7 +65,7 @@ class HealthCheck(BaseModel):
                 {% endif %}
                 <Port>{{ health_check.port }}</Port>
                 <Type>{{ health_check.type_ }}</Type>
-                <ResourcePath>{{ health_check.resource_path }}</ResourcePath>
+                <ResourcePath>{{ health_check.resource_path_xml }}</ResourcePath>
                 <FullyQualifiedDomainName>{{ health_check.fqdn }}</FullyQualifiedDomainName>
                 <RequestInterval>{{ health_check.request_interval }}</RequestInterval>
                 <FailureThreshold>{{ health_check.failure_threshold }}</FailureThreshold>
