@@ -180,16 +180,20 @@ class Route53(BaseResponse):
             properties = xmltodict.parse(self.body)["CreateHealthCheckRequest"][
                 "HealthCheckConfig"
             ]
-            health_check_args = {
-                "ip_address": properties.get("IPAddress"),
-                "port": properties.get("Port"),
-                "type": properties["Type"],
-                "resource_path": properties.get("ResourcePath"),
-                "fqdn": properties.get("FullyQualifiedDomainName"),
-                "search_string": properties.get("SearchString"),
-                "request_interval": properties.get("RequestInterval"),
-                "failure_threshold": properties.get("FailureThreshold"),
-            }
+            health_check_args = dict(
+                (k, v)
+                for k, v in {
+                    "ip_address": properties.get("IPAddress"),
+                    "port": properties.get("Port"),
+                    "type": properties["Type"],
+                    "resource_path": properties.get("ResourcePath"),
+                    "fqdn": properties.get("FullyQualifiedDomainName"),
+                    "search_string": properties.get("SearchString"),
+                    "request_interval": properties.get("RequestInterval"),
+                    "failure_threshold": properties.get("FailureThreshold"),
+                }.items()
+                if v is not None
+            )
             health_check = route53_backend.create_health_check(health_check_args)
             template = Template(CREATE_HEALTH_CHECK_RESPONSE)
             return 201, headers, template.render(health_check=health_check)

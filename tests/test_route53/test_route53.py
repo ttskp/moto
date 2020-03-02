@@ -219,6 +219,32 @@ def test_create_health_check():
     config["FailureThreshold"].should.equal("2")
 
 
+@mock_route53
+def test_create_health_check_with_domain_name():
+    conn = boto3.client("route53", region_name="us-east-1")
+
+    conn.create_health_check(
+        CallerReference="caller",
+        HealthCheckConfig={
+            "Type": "HTTPS",
+            "FullyQualifiedDomainName": "example.com",
+            "Port": 443,
+            "ResourcePath": "/",
+        },
+    )
+
+    checks = conn.list_health_checks()["HealthChecks"]
+    list(checks).should.have.length_of(1)
+    check = checks[0]
+    config = check["HealthCheckConfig"]
+    config["Port"].should.equal(443)
+    config["Type"].should.equal("HTTPS")
+    config["ResourcePath"].should.equal("/")
+    config["FullyQualifiedDomainName"].should.equal("example.com")
+    config["RequestInterval"].should.equal(30)
+    config["FailureThreshold"].should.equal(3)
+
+
 @mock_route53_deprecated
 def test_delete_health_check():
     conn = boto.connect_route53("the_key", "the_secret")

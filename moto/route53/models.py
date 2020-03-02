@@ -58,7 +58,9 @@ class HealthCheck(BaseModel):
             <Id>{{ health_check.id }}</Id>
             <CallerReference>example.com 192.0.2.17</CallerReference>
             <HealthCheckConfig>
-                <IPAddress>{{ health_check.ip_address }}</IPAddress>
+                {% if health_check.ip_address %}
+                    <IPAddress>{{ health_check.ip_address }}</IPAddress>
+                {% endif %}
                 <Port>{{ health_check.port }}</Port>
                 <Type>{{ health_check.type_ }}</Type>
                 <ResourcePath>{{ health_check.resource_path }}</ResourcePath>
