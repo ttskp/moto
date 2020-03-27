@@ -1,0 +1,33 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+moto = {editable = true,file = "file:///D:/ws/cloud-contrib/moto"}
+mock = "*"
+nose = "*"
+sure = "==1.4.11"
+coverage = "==4.5.4"
+flake8 = "==3.7.8"
+freezegun = "*"
+boto = ">=2.45.0"
+boto3 = ">=1.4.4"
+botocore = ">=1.12.13"
+six = ">=1.9"
+parameterized = ">=0.7.0"
+prompt-toolkit = "==1.0.14"
+click = "==6.7"
+inflection = "==0.3.1"
+lxml = "==4.2.3"
+beautifulsoup4 = "==4.6.0"
+Flask = "*"
+
+[packages]
+moto = {editable = true,file = "file:///D:/ws/cloud-contrib/moto"}
+
+[scripts]
+tests = "python -m nose -sv ./tests/"
+
+[requires]
+python_version = "3.6"
