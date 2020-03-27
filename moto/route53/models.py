@@ -20,6 +20,7 @@ def create_route53_zone_id():
 
 
 class HealthCheck(BaseModel):
+
     def __init__(self, health_check_id, health_check_args):
         self.id = health_check_id
         self.ip_address = health_check_args.get("ip_address")
@@ -31,6 +32,21 @@ class HealthCheck(BaseModel):
         self.search_string = health_check_args.get("search_string")
         self.request_interval = health_check_args.get("request_interval", 30)
         self.failure_threshold = health_check_args.get("failure_threshold", 3)
+
+    def update(self, health_check_args):
+        if "ip_address" in health_check_args:
+            self.ip_address = health_check_args.get("ip_address")
+        if "port" in health_check_args:
+            self.port = health_check_args.get("port")
+        if "resource_path" in health_check_args:
+            self.resource_path = health_check_args.get("resource_path")
+            self.resource_path_xml = escape(health_check_args.get("resource_path"))
+        if "fqdn" in health_check_args:
+            self.fqdn = health_check_args.get("fqdn")
+        if "search_string" in health_check_args:
+            self.search_string = health_check_args.get("search_string")
+        if "failure_threshold" in health_check_args:
+            self.failure_threshold = health_check_args.get("failure_threshold")
 
     @property
     def physical_resource_id(self):
@@ -349,6 +365,12 @@ class Route53Backend(BaseBackend):
         health_check_id = str(uuid.uuid4())
         health_check = HealthCheck(health_check_id, health_check_args)
         self.health_checks[health_check_id] = health_check
+        return health_check
+    
+    def update_health_check(self, health_check_id, health_check_args):
+        health_check = self.health_checks[health_check_id]
+        if health_check is not None:
+            health_check.update(health_check_args)
         return health_check
 
     def get_health_checks(self):

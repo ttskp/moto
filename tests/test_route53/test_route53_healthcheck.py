@@ -61,7 +61,7 @@ class Tests:
         self.given_health_check(health_check_config)
 
         self.conn.update_health_check(
-            HealthCheckId="",
+            HealthCheckId=self.checks[0]["Id"],
             ResourcePath="/search?q=moto&format=json"
         )
 
@@ -71,7 +71,6 @@ class Tests:
             "RequestInterval": 30,
             "FailureThreshold": 3,
         })
-
 
     @mock_route53
     def test_delete_health_check(self):
@@ -94,7 +93,7 @@ class Tests:
         self.conn = boto3.client("route53", region_name="us-east-1")
 
     def given_health_check(self, health_check_config):
-        self.checks = [self._create_health_check(health_check_config)]
+        self.checks = [self._create_health_check(health_check_config)["HealthCheck"]]
 
     def when_health_check_is_created_with(self, health_check_config):
         self._create_health_check(health_check_config)

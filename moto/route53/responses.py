@@ -177,34 +177,57 @@ class Route53(BaseResponse):
         method = request.method
 
         if method == "POST":
-            properties = xmltodict.parse(self.body)["CreateHealthCheckRequest"][
-                "HealthCheckConfig"
-            ]
-            health_check_args = dict(
-                (k, v)
-                for k, v in {
-                    "ip_address": properties.get("IPAddress"),
-                    "port": properties.get("Port"),
-                    "type": properties["Type"],
-                    "resource_path": properties.get("ResourcePath"),
-                    "fqdn": properties.get("FullyQualifiedDomainName"),
-                    "search_string": properties.get("SearchString"),
-                    "request_interval": properties.get("RequestInterval"),
-                    "failure_threshold": properties.get("FailureThreshold"),
-                }.items()
-                if v is not None
+            parsed_body = xmltodict.parse(self.body)
+
+            if "CreateHealthCheckRequest" in parsed_body:
+                properties = parsed_body["CreateHealthCheckRequest"]["HealthCheckConfig"]
+                health_check_args = self.normalized_health_check_args(properties)
+                health_check = route53_backend.create_health_check(health_check_args)
+                template = Template(CREATE_HEALTH_CHECK_RESPONSE)
+                return 201, headers, template.render(health_check=health_check)
+
+            elif "UpdateHealthCheckRequest" in parsed_body:
+                properties = parsed_body["UpdateHealthCheckRequest"]
+                health_check_args = self.normalized_health_check_args(properties)
+                health_check_id = parsed_url.path.split("/")[-1]
+
+                health_check = route53_backend.update_health_check(health_check_id, health_check_args)
+                if not health_check:
+                    return 404, headers, "Health check %s not Found" % health_check_id
+
+                template = Template(UPDATE_HEALTH_CHECK_RESPONSE)
+                return 201, headers, template.render(health_check=health_check)
+
+            raise NotImplementedError(
+                "The action for {0} has not been implemented for route 53".format(list(parsed_body.keys())[0])
             )
-            health_check = route53_backend.create_health_check(health_check_args)
-            template = Template(CREATE_HEALTH_CHECK_RESPONSE)
-            return 201, headers, template.render(health_check=health_check)
+
         elif method == "DELETE":
             health_check_id = parsed_url.path.split("/")[-1]
             route53_backend.delete_health_check(health_check_id)
             return 200, headers, DELETE_HEALTH_CHECK_RESPONSE
+
         elif method == "GET":
             template = Template(LIST_HEALTH_CHECKS_RESPONSE)
             health_checks = route53_backend.get_health_checks()
             return 200, headers, template.render(health_checks=health_checks)
+
+    def normalized_health_check_args(self, properties):
+        health_check_args = dict(
+            (k, v)
+            for k, v in {
+                "ip_address": properties.get("IPAddress"),
+                "port": properties.get("Port"),
+                "type": properties.get("Type"),
+                "resource_path": properties.get("ResourcePath"),
+                "fqdn": properties.get("FullyQualifiedDomainName"),
+                "search_string": properties.get("SearchString"),
+                "request_interval": properties.get("RequestInterval"),
+                "failure_threshold": properties.get("FailureThreshold"),
+            }.items()
+            if v is not None
+        )
+        return health_check_args
 
     def not_implemented_response(self, request, full_url, headers):
         self.setup_class(request, full_url, headers)
@@ -371,6 +394,11 @@ CREATE_HEALTH_CHECK_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
 <CreateHealthCheckResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
   {{ health_check.to_xml() }}
 </CreateHealthCheckResponse>"""
+
+UPDATE_HEALTH_CHECK_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
+<UpdateHealthCheckResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  {{ health_check.to_xml() }}
+</UpdateHealthCheckResponse>"""
 
 LIST_HEALTH_CHECKS_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
 <ListHealthChecksResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
