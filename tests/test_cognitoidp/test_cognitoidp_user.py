@@ -63,3 +63,28 @@ def test_update_user_attributes():
             val.should.equal("Doe")
         elif attr["Name"] == "given_name":
             val.should.equal("Jane")
+
+
+@mock_cognitoidp
+def test_delete_user_attributes():
+    conn = boto3.client("cognito-idp", "us-west-2")
+
+    outputs = authentication_flow(conn, user_attributes=[
+        {"Name": "family_name", "Value": "Doe"},
+        {"Name": "given_name", "Value": "John"},
+        {"Name": "custom:company", "Value": "John Doe Inc."}
+    ])
+
+    conn.delete_user_attributes(
+        AccessToken=outputs["access_token"],
+        UserAttributeNames=["custom:company"]
+    )
+
+    user = conn.admin_get_user(UserPoolId=outputs["user_pool_id"], Username=outputs["username"])
+    attributes = user["UserAttributes"]
+    attributes.should.be.a(list)
+    attributes_dict = {attr["Name"]: attr["Value"] for attr in attributes}
+
+    assert "custom:company" not in attributes_dict
+    assert "family_name" in attributes_dict
+    assert "given_name" in attributes_dict

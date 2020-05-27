@@ -318,16 +318,23 @@ class CognitoIdpUser(BaseModel):
 
         return user_json
 
+    @staticmethod
+    def _flatten_attrs(attrs):
+        return {attr["Name"]: attr["Value"] for attr in attrs}
+
+    @staticmethod
+    def _expand_attrs(attrs):
+        return [{"Name": k, "Value": v} for k, v in attrs.items()]
+
     def update_attributes(self, new_attributes):
-        def flatten_attrs(attrs):
-            return {attr["Name"]: attr["Value"] for attr in attrs}
+        flat_attributes = self._flatten_attrs(self.attributes)
+        flat_attributes.update(self._flatten_attrs(new_attributes))
+        self.attributes = self._expand_attrs(flat_attributes)
 
-        def expand_attrs(attrs):
-            return [{"Name": k, "Value": v} for k, v in attrs.items()]
-
-        flat_attributes = flatten_attrs(self.attributes)
-        flat_attributes.update(flatten_attrs(new_attributes))
-        self.attributes = expand_attrs(flat_attributes)
+    def delete_attributes(self, attribute_names):
+        flat_attributes = self._flatten_attrs(self.attributes)
+        new_flat_attributes = {key: val for key, val in flat_attributes.items() if key not in attribute_names}
+        self.attributes = self._expand_attrs(new_flat_attributes)
 
 
 class CognitoIdpBackend(BaseBackend):
@@ -786,6 +793,17 @@ class CognitoIdpBackend(BaseBackend):
                 user.update_attributes(attributes)
                 break
 
+    def delete_user_attributes(self, access_token, attribute_names):
+        for user_pool in self.user_pools.values():
+            if access_token in user_pool.access_tokens:
+                _, username = user_pool.access_tokens[access_token]
+                user = user_pool.users.get(username)
+
+                if not user:
+                    raise UserNotFoundError(username)
+
+                user.delete_attributes(set(attribute_names))
+                break
 
 cognitoidp_backends = {}
 for region in Session().get_available_regions("cognito-idp"):

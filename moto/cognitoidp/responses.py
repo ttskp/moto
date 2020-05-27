@@ -391,6 +391,15 @@ class CognitoIdpResponse(BaseResponse):
         )
         return ""
 
+    def delete_user_attributes(self):
+        access_token = self._get_param("AccessToken")
+        attributes_names = self._get_param("UserAttributeNames")
+        cognitoidp_backends[self.region].delete_user_attributes(
+            access_token, set(attributes_names)
+        )
+        return ""
+
+
 class CognitoIdpJsonWebKeyResponse(BaseResponse):
     def __init__(self):
         with open(
