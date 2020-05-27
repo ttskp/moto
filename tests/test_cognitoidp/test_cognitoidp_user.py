@@ -20,6 +20,24 @@ from tests.test_cognitoidp.test_cognitoidp import authentication_flow
 
 
 @mock_cognitoidp
+def test_delete_user():
+    conn = boto3.client("cognito-idp", "us-west-2")
+    outputs = authentication_flow(conn)
+
+    conn.delete_user(
+        AccessToken=outputs["access_token"]
+    )
+
+    caught = False
+    try:
+        conn.admin_get_user(UserPoolId=outputs["user_pool_id"], Username=outputs["username"])
+    except conn.exceptions.UserNotFoundException:
+        caught = True
+
+    caught.should.be.true
+
+
+@mock_cognitoidp
 def test_update_user_attributes():
     conn = boto3.client("cognito-idp", "us-west-2")
 

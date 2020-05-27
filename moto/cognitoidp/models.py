@@ -632,6 +632,21 @@ class CognitoIdpBackend(BaseBackend):
 
         del user_pool.users[username]
 
+    def delete_user(self, access_token):
+        for user_pool in self.user_pools.values():
+            if access_token in user_pool.access_tokens:
+                _, username = user_pool.access_tokens[access_token]
+                user = user_pool.users.get(username)
+
+                if not user:
+                    raise UserNotFoundError(username)
+
+                for group in user.groups:
+                    group.users.remove(user)
+
+                del user_pool.users[username]
+                break
+
     def _log_user_in(self, user_pool, client, username):
         refresh_token = user_pool.create_refresh_token(client.id, username)
         access_token, id_token, expires_in = user_pool.create_tokens_from_refresh_token(

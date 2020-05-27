@@ -316,6 +316,11 @@ class CognitoIdpResponse(BaseResponse):
         cognitoidp_backends[self.region].admin_delete_user(user_pool_id, username)
         return ""
 
+    def delete_user(self):
+        access_token = self._get_param("AccessToken")
+        cognitoidp_backends[self.region].delete_user(access_token)
+        return ""
+
     def admin_initiate_auth(self):
         user_pool_id = self._get_param("UserPoolId")
         client_id = self._get_param("ClientId")
