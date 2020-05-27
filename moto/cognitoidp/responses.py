@@ -378,6 +378,13 @@ class CognitoIdpResponse(BaseResponse):
         )
         return ""
 
+    def update_user_attributes(self):
+        access_token = self._get_param("AccessToken")
+        attributes = self._get_param("UserAttributes")
+        cognitoidp_backends[self.region].update_user_attributes(
+            access_token, attributes
+        )
+        return ""
 
 class CognitoIdpJsonWebKeyResponse(BaseResponse):
     def __init__(self):

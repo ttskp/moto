@@ -1130,23 +1130,27 @@ def test_admin_delete_user():
     caught.should.be.true
 
 
-def authentication_flow(conn):
+def authentication_flow(conn, user_attributes=None):
     username = str(uuid.uuid4())
     temporary_password = str(uuid.uuid4())
     user_pool_id = conn.create_user_pool(PoolName=str(uuid.uuid4()))["UserPool"]["Id"]
-    user_attribute_name = str(uuid.uuid4())
-    user_attribute_value = str(uuid.uuid4())
+
+    user_attributes = [{
+        "Name": str(uuid.uuid4()),
+        "Value": str(uuid.uuid4())
+    }] if user_attributes is None else user_attributes
+
     client_id = conn.create_user_pool_client(
         UserPoolId=user_pool_id,
         ClientName=str(uuid.uuid4()),
-        ReadAttributes=[user_attribute_name],
+        ReadAttributes=[attr["Name"] for attr in user_attributes],
     )["UserPoolClient"]["ClientId"]
 
     conn.admin_create_user(
         UserPoolId=user_pool_id,
         Username=username,
         TemporaryPassword=temporary_password,
-        UserAttributes=[{"Name": user_attribute_name, "Value": user_attribute_value}],
+        UserAttributes=user_attributes,
     )
 
     result = conn.admin_initiate_auth(
@@ -1179,7 +1183,7 @@ def authentication_flow(conn):
         "access_token": result["AuthenticationResult"]["AccessToken"],
         "username": username,
         "password": new_password,
-        "additional_fields": {user_attribute_name: user_attribute_value},
+        "additional_fields": {attr["Name"]: attr["Value"] for attr in user_attributes},
     }
 
 
@@ -1309,3 +1313,4 @@ def test_admin_update_user_attributes():
             val.should.equal("Doe")
         elif attr["Name"] == "given_name":
             val.should.equal("Jane")
+

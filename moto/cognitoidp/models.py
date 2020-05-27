@@ -759,6 +759,18 @@ class CognitoIdpBackend(BaseBackend):
         user = user_pool.users[username]
         user.update_attributes(attributes)
 
+    def update_user_attributes(self, access_token, attributes):
+        for user_pool in self.user_pools.values():
+            if access_token in user_pool.access_tokens:
+                _, username = user_pool.access_tokens[access_token]
+                user = user_pool.users.get(username)
+
+                if not user:
+                    raise UserNotFoundError(username)
+
+                user.update_attributes(attributes)
+                break
+
 
 cognitoidp_backends = {}
 for region in Session().get_available_regions("cognito-idp"):
