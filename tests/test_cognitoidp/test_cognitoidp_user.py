@@ -1,22 +1,31 @@
 from __future__ import unicode_literals
 
-import json
-import os
-import random
-import uuid
-
 import boto3
-
 # noinspection PyUnresolvedReferences
 import sure  # noqa
-from botocore.exceptions import ClientError
-from jose import jws
-from nose.tools import assert_raises
 
 from moto import mock_cognitoidp
-from moto.core import ACCOUNT_ID
-
 from tests.test_cognitoidp.test_cognitoidp import authentication_flow
+
+
+@mock_cognitoidp
+def test_get_user():
+    conn = boto3.client("cognito-idp", "us-west-2")
+    outputs = authentication_flow(conn, user_attributes=[
+        {"Name": "family_name", "Value": "Doe"},
+        {"Name": "given_name", "Value": "John"},
+    ])
+
+    result = conn.get_user(
+        AccessToken=outputs["access_token"]
+    )
+
+    result["Username"].should.equal(outputs["username"])
+    result["UserAttributes"].should.have.length_of(2)
+    result["UserAttributes"][0]["Name"].should.equal("family_name")
+    result["UserAttributes"][0]["Value"].should.equal("Doe")
+    result["UserAttributes"][1]["Name"].should.equal("given_name")
+    result["UserAttributes"][1]["Value"].should.equal("John")
 
 
 @mock_cognitoidp

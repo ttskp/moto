@@ -609,6 +609,17 @@ class CognitoIdpBackend(BaseBackend):
 
         return user_pool.users[username]
 
+    def get_user(self, access_token):
+        for user_pool in self.user_pools.values():
+            if access_token in user_pool.access_tokens:
+                _, username = user_pool.access_tokens[access_token]
+                user = user_pool.users.get(username)
+
+                if not user:
+                    raise UserNotFoundError(username)
+
+                return user
+
     @paginate(60, "pagination_token", "limit")
     def list_users(self, user_pool_id, pagination_token=None, limit=None):
         user_pool = self.user_pools.get(user_pool_id)
