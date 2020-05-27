@@ -155,7 +155,6 @@ AMIS = _load_resource(
     or resource_filename(__name__, "resources/amis.json"),
 )
 
-
 OWNER_ID = ACCOUNT_ID
 
 
@@ -216,15 +215,15 @@ class TaggedEC2Resource(BaseModel):
 
 class NetworkInterface(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        subnet,
-        private_ip_address,
-        private_ip_addresses=None,
-        device_index=0,
-        public_ip_auto_assign=True,
-        group_ids=None,
-        description=None,
+            self,
+            ec2_backend,
+            subnet,
+            private_ip_address,
+            private_ip_addresses=None,
+            device_index=0,
+            public_ip_auto_assign=True,
+            group_ids=None,
+            description=None,
     ):
         self.ec2_backend = ec2_backend
         self.id = random_eni_id()
@@ -265,7 +264,7 @@ class NetworkInterface(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -349,13 +348,13 @@ class NetworkInterfaceBackend(object):
         super(NetworkInterfaceBackend, self).__init__()
 
     def create_network_interface(
-        self,
-        subnet,
-        private_ip_address,
-        private_ip_addresses=None,
-        group_ids=None,
-        description=None,
-        **kwargs
+            self,
+            subnet,
+            private_ip_address,
+            private_ip_addresses=None,
+            group_ids=None,
+            description=None,
+            **kwargs
     ):
         eni = NetworkInterface(
             self,
@@ -600,7 +599,7 @@ class Instance(TaggedEC2Resource, BotoInstance):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -628,7 +627,7 @@ class Instance(TaggedEC2Resource, BotoInstance):
 
     @classmethod
     def delete_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         ec2_backend = ec2_backends[region_name]
         all_instances = ec2_backend.all_instances()
@@ -642,8 +641,8 @@ class Instance(TaggedEC2Resource, BotoInstance):
             instance_tags = instance.get_tags()
             for tag in instance_tags:
                 if (
-                    tag["key"] == "aws:cloudformation:logical-id"
-                    and tag["value"] == logical_id
+                        tag["key"] == "aws:cloudformation:logical-id"
+                        and tag["value"] == logical_id
                 ):
                     instance.delete(region_name)
 
@@ -689,8 +688,8 @@ class Instance(TaggedEC2Resource, BotoInstance):
             spot_fleet = self.ec2_backend.get_spot_fleet_request(self._spot_fleet_id)
             for spec in spot_fleet.launch_specs:
                 if (
-                    spec.instance_type == self.instance_type
-                    and spec.subnet_id == self.subnet_id
+                        spec.instance_type == self.instance_type
+                        and spec.subnet_id == self.subnet_id
                 ):
                     break
             spot_fleet.fulfilled_capacity -= spec.weighted_capacity
@@ -1101,9 +1100,9 @@ class TagBackend(object):
         for resource_id in resource_ids:
             if resource_id in self.tags:
                 if (
-                    len(self.tags[resource_id])
-                    + len([tag for tag in tags if not tag.startswith("aws:")])
-                    > 50
+                        len(self.tags[resource_id])
+                        + len([tag for tag in tags if not tag.startswith("aws:")])
+                        > 50
                 ):
                     raise TagLimitExceeded()
             elif len([tag for tag in tags if not tag.startswith("aws:")]) > 50:
@@ -1177,8 +1176,8 @@ class TagBackend(object):
                     if resource_type_filters:
                         for resource_type in resource_type_filters:
                             if (
-                                EC2_PREFIX_TO_RESOURCE[get_prefix(resource_id)]
-                                == resource_type
+                                    EC2_PREFIX_TO_RESOURCE[get_prefix(resource_id)]
+                                    == resource_type
                             ):
                                 type_pass = True
                     else:
@@ -1207,27 +1206,27 @@ class TagBackend(object):
 
 class Ami(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        ami_id,
-        instance=None,
-        source_ami=None,
-        name=None,
-        description=None,
-        owner_id=OWNER_ID,
-        public=False,
-        virtualization_type=None,
-        architecture=None,
-        state="available",
-        creation_date=None,
-        platform=None,
-        image_type="machine",
-        image_location=None,
-        hypervisor=None,
-        root_device_type="standard",
-        root_device_name="/dev/sda1",
-        sriov="simple",
-        region_name="us-east-1a",
+            self,
+            ec2_backend,
+            ami_id,
+            instance=None,
+            source_ami=None,
+            name=None,
+            description=None,
+            owner_id=OWNER_ID,
+            public=False,
+            virtualization_type=None,
+            architecture=None,
+            state="available",
+            creation_date=None,
+            platform=None,
+            image_type="machine",
+            image_location=None,
+            hypervisor=None,
+            root_device_type="standard",
+            root_device_name="/dev/sda1",
+            sriov="simple",
+            region_name="us-east-1a",
     ):
         self.ec2_backend = ec2_backend
         self.id = ami_id
@@ -1315,7 +1314,6 @@ class Ami(TaggedEC2Resource):
 
 
 class AmiBackend(object):
-
     AMI_REGEX = re.compile("ami-[a-z0-9]+")
 
     def __init__(self):
@@ -1364,7 +1362,7 @@ class AmiBackend(object):
         return ami
 
     def describe_images(
-        self, ami_ids=(), filters=None, exec_users=None, owners=None, context=None
+            self, ami_ids=(), filters=None, exec_users=None, owners=None, context=None
     ):
         images = self.amis.values()
 
@@ -1393,7 +1391,7 @@ class AmiBackend(object):
             # Limit by owner ids
             if owners:
                 # support filtering by Owners=['self']
-                owners = list(map(lambda o: OWNER_ID if o == "self" else o, owners,))
+                owners = list(map(lambda o: OWNER_ID if o == "self" else o, owners, ))
                 images = [ami for ami in images if ami.owner_id in owners]
 
             # Generic filters
@@ -1481,6 +1479,11 @@ class RegionsAndZonesBackend(object):
         regions.append(Region(region, "ec2.{}.amazonaws.com.cn".format(region)))
 
     zones = {
+        "af-south-1": [
+            Zone(region_name="af-south-1", name="af-south-1a", zone_id="afs1-az1"),
+            Zone(region_name="af-south-1", name="af-south-1b", zone_id="afs1-az2"),
+            Zone(region_name="af-south-1", name="af-south-1c", zone_id="afs1-az3"),
+        ],
         "ap-south-1": [
             Zone(region_name="ap-south-1", name="ap-south-1a", zone_id="aps1-az1"),
             Zone(region_name="ap-south-1", name="ap-south-1b", zone_id="aps1-az3"),
@@ -1592,6 +1595,11 @@ class RegionsAndZonesBackend(object):
             Zone(region_name="eu-central-1", name="eu-central-1a", zone_id="euc1-az2"),
             Zone(region_name="eu-central-1", name="eu-central-1b", zone_id="euc1-az3"),
             Zone(region_name="eu-central-1", name="eu-central-1c", zone_id="euc1-az1"),
+        ],
+        "eu-south-1": [
+            Zone(region_name="eu-south-1", name="eu-south-1a", zone_id="eus1-az1"),
+            Zone(region_name="eu-south-1", name="eu-south-1b", zone_id="eus1-az2"),
+            Zone(region_name="eu-south-1", name="eu-south-1c", zone_id="eus1-az3"),
         ],
         "us-east-1": [
             Zone(region_name="us-east-1", name="us-east-1a", zone_id="use1-az6"),
@@ -1724,7 +1732,7 @@ class SecurityGroup(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -1758,7 +1766,7 @@ class SecurityGroup(TaggedEC2Resource):
 
     @classmethod
     def update_from_cloudformation_json(
-        cls, original_resource, new_resource_name, cloudformation_json, region_name
+            cls, original_resource, new_resource_name, cloudformation_json, region_name
     ):
         cls._delete_security_group_given_vpc_id(
             original_resource.name, original_resource.vpc_id, region_name
@@ -1769,7 +1777,7 @@ class SecurityGroup(TaggedEC2Resource):
 
     @classmethod
     def delete_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
         vpc_id = properties.get("VpcId")
@@ -1941,15 +1949,15 @@ class SecurityGroupBackend(object):
         return group
 
     def authorize_security_group_ingress(
-        self,
-        group_name_or_id,
-        ip_protocol,
-        from_port,
-        to_port,
-        ip_ranges,
-        source_group_names=None,
-        source_group_ids=None,
-        vpc_id=None,
+            self,
+            group_name_or_id,
+            ip_protocol,
+            from_port,
+            to_port,
+            ip_ranges,
+            source_group_names=None,
+            source_group_ids=None,
+            vpc_id=None,
     ):
         group = self.get_security_group_by_name_or_id(group_name_or_id, vpc_id)
         if ip_ranges and not isinstance(ip_ranges, list):
@@ -1988,15 +1996,15 @@ class SecurityGroupBackend(object):
         group.add_ingress_rule(security_rule)
 
     def revoke_security_group_ingress(
-        self,
-        group_name_or_id,
-        ip_protocol,
-        from_port,
-        to_port,
-        ip_ranges,
-        source_group_names=None,
-        source_group_ids=None,
-        vpc_id=None,
+            self,
+            group_name_or_id,
+            ip_protocol,
+            from_port,
+            to_port,
+            ip_ranges,
+            source_group_names=None,
+            source_group_ids=None,
+            vpc_id=None,
     ):
 
         group = self.get_security_group_by_name_or_id(group_name_or_id, vpc_id)
@@ -2021,15 +2029,15 @@ class SecurityGroupBackend(object):
         raise InvalidPermissionNotFoundError()
 
     def authorize_security_group_egress(
-        self,
-        group_name_or_id,
-        ip_protocol,
-        from_port,
-        to_port,
-        ip_ranges,
-        source_group_names=None,
-        source_group_ids=None,
-        vpc_id=None,
+            self,
+            group_name_or_id,
+            ip_protocol,
+            from_port,
+            to_port,
+            ip_ranges,
+            source_group_names=None,
+            source_group_ids=None,
+            vpc_id=None,
     ):
 
         group = self.get_security_group_by_name_or_id(group_name_or_id, vpc_id)
@@ -2069,15 +2077,15 @@ class SecurityGroupBackend(object):
         group.add_egress_rule(security_rule)
 
     def revoke_security_group_egress(
-        self,
-        group_name_or_id,
-        ip_protocol,
-        from_port,
-        to_port,
-        ip_ranges,
-        source_group_names=None,
-        source_group_ids=None,
-        vpc_id=None,
+            self,
+            group_name_or_id,
+            ip_protocol,
+            from_port,
+            to_port,
+            ip_ranges,
+            source_group_names=None,
+            source_group_ids=None,
+            vpc_id=None,
     ):
 
         group = self.get_security_group_by_name_or_id(group_name_or_id, vpc_id)
@@ -2102,12 +2110,12 @@ class SecurityGroupBackend(object):
         raise InvalidPermissionNotFoundError()
 
     def _verify_group_will_respect_rule_count_limit(
-        self,
-        group,
-        current_rule_nb,
-        ip_ranges,
-        source_group_names=None,
-        source_group_ids=None,
+            self,
+            group,
+            current_rule_nb,
+            ip_ranges,
+            source_group_names=None,
+            source_group_ids=None,
     ):
         max_nb_rules = 50 if group.vpc_id else 100
         future_group_nb_rules = current_rule_nb
@@ -2128,7 +2136,7 @@ class SecurityGroupIngress(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -2147,10 +2155,10 @@ class SecurityGroupIngress(object):
 
         assert group_id or group_name
         assert (
-            source_security_group_name
-            or cidr_ip
-            or cidr_ipv6
-            or source_security_group_id
+                source_security_group_name
+                or cidr_ip
+                or cidr_ipv6
+                or source_security_group_id
         )
         assert ip_protocol
 
@@ -2199,7 +2207,7 @@ class VolumeAttachment(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -2217,7 +2225,7 @@ class VolumeAttachment(object):
 
 class Volume(TaggedEC2Resource):
     def __init__(
-        self, ec2_backend, volume_id, size, zone, snapshot_id=None, encrypted=False
+            self, ec2_backend, volume_id, size, zone, snapshot_id=None, encrypted=False
     ):
         self.id = volume_id
         self.size = size
@@ -2230,7 +2238,7 @@ class Volume(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -2282,13 +2290,13 @@ class Volume(TaggedEC2Resource):
 
 class Snapshot(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        snapshot_id,
-        volume,
-        description,
-        encrypted=False,
-        owner_id=OWNER_ID,
+            self,
+            ec2_backend,
+            snapshot_id,
+            volume,
+            description,
+            encrypted=False,
+            owner_id=OWNER_ID,
     ):
         self.id = snapshot_id
         self.volume = volume
@@ -2473,13 +2481,13 @@ class EBSBackend(object):
 
 class VPC(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        vpc_id,
-        cidr_block,
-        is_default,
-        instance_tenancy="default",
-        amazon_provided_ipv6_cidr_block=False,
+            self,
+            ec2_backend,
+            vpc_id,
+            cidr_block,
+            is_default,
+            instance_tenancy="default",
+            amazon_provided_ipv6_cidr_block=False,
     ):
 
         self.ec2_backend = ec2_backend
@@ -2506,7 +2514,7 @@ class VPC(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -2532,21 +2540,21 @@ class VPC(TaggedEC2Resource):
         elif filter_name in ("cidr", "cidr-block", "cidrBlock"):
             return self.cidr_block
         elif filter_name in (
-            "cidr-block-association.cidr-block",
-            "ipv6-cidr-block-association.ipv6-cidr-block",
+                "cidr-block-association.cidr-block",
+                "ipv6-cidr-block-association.ipv6-cidr-block",
         ):
             return [
                 c["cidr_block"]
                 for c in self.get_cidr_block_association_set(ipv6="ipv6" in filter_name)
             ]
         elif filter_name in (
-            "cidr-block-association.association-id",
-            "ipv6-cidr-block-association.association-id",
+                "cidr-block-association.association-id",
+                "ipv6-cidr-block-association.association-id",
         ):
             return self.cidr_block_association_set.keys()
         elif filter_name in (
-            "cidr-block-association.state",
-            "ipv6-cidr-block-association.state",
+                "cidr-block-association.state",
+                "ipv6-cidr-block-association.state",
         ):
             return [
                 c["cidr_block_state"]["state"]
@@ -2566,13 +2574,13 @@ class VPC(TaggedEC2Resource):
             return super(VPC, self).get_filter_value(filter_name, "DescribeVpcs")
 
     def associate_vpc_cidr_block(
-        self, cidr_block, amazon_provided_ipv6_cidr_block=False
+            self, cidr_block, amazon_provided_ipv6_cidr_block=False
     ):
         max_associations = 5 if not amazon_provided_ipv6_cidr_block else 1
 
         if (
-            len(self.get_cidr_block_association_set(amazon_provided_ipv6_cidr_block))
-            >= max_associations
+                len(self.get_cidr_block_association_set(amazon_provided_ipv6_cidr_block))
+                >= max_associations
         ):
             raise CidrLimitExceeded(self.id, max_associations)
 
@@ -2595,9 +2603,9 @@ class VPC(TaggedEC2Resource):
         # See https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-classiclink.html#classiclink-limitations
         network_address = ipaddress.ip_network(self.cidr_block).network_address
         if (
-            network_address not in ipaddress.ip_network("10.0.0.0/8")
-            or network_address in ipaddress.ip_network("10.0.0.0/16")
-            or network_address in ipaddress.ip_network("10.1.0.0/16")
+                network_address not in ipaddress.ip_network("10.0.0.0/8")
+                or network_address in ipaddress.ip_network("10.0.0.0/16")
+                or network_address in ipaddress.ip_network("10.1.0.0/16")
         ):
             self.classic_link_enabled = "true"
 
@@ -2617,7 +2625,7 @@ class VPC(TaggedEC2Resource):
 
     def disassociate_vpc_cidr_block(self, association_id):
         if self.cidr_block == self.cidr_block_association_set.get(
-            association_id, {}
+                association_id, {}
         ).get("cidr_block"):
             raise OperationNotPermitted(association_id)
 
@@ -2651,10 +2659,10 @@ class VPCBackend(object):
                 yield inst
 
     def create_vpc(
-        self,
-        cidr_block,
-        instance_tenancy="default",
-        amazon_provided_ipv6_cidr_block=False,
+            self,
+            cidr_block,
+            instance_tenancy="default",
+            amazon_provided_ipv6_cidr_block=False,
     ):
         vpc_id = random_vpc_id()
         try:
@@ -2777,7 +2785,7 @@ class VPCBackend(object):
             raise InvalidVpcCidrBlockAssociationIdError(association_id)
 
     def associate_vpc_cidr_block(
-        self, vpc_id, cidr_block, amazon_provided_ipv6_cidr_block
+            self, vpc_id, cidr_block, amazon_provided_ipv6_cidr_block
     ):
         vpc = self.get_vpc(vpc_id)
         return vpc.associate_vpc_cidr_block(cidr_block, amazon_provided_ipv6_cidr_block)
@@ -2818,7 +2826,7 @@ class VPCPeeringConnection(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -2903,16 +2911,16 @@ class VPCPeeringConnectionBackend(object):
 
 class Subnet(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        subnet_id,
-        vpc_id,
-        cidr_block,
-        availability_zone,
-        default_for_az,
-        map_public_ip_on_launch,
-        owner_id=OWNER_ID,
-        assign_ipv6_address_on_creation=False,
+            self,
+            ec2_backend,
+            subnet_id,
+            vpc_id,
+            cidr_block,
+            availability_zone,
+            default_for_az,
+            map_public_ip_on_launch,
+            owner_id=OWNER_ID,
+            assign_ipv6_address_on_creation=False,
     ):
         self.ec2_backend = ec2_backend
         self.id = subnet_id
@@ -2920,7 +2928,7 @@ class Subnet(TaggedEC2Resource):
         self.cidr_block = cidr_block
         self.cidr = ipaddress.IPv4Network(six.text_type(self.cidr_block), strict=False)
         self._available_ip_addresses = (
-            ipaddress.IPv4Network(six.text_type(self.cidr_block)).num_addresses - 5
+                ipaddress.IPv4Network(six.text_type(self.cidr_block)).num_addresses - 5
         )
         self._availability_zone = availability_zone
         self.default_for_az = default_for_az
@@ -2939,7 +2947,7 @@ class Subnet(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -3087,8 +3095,8 @@ class SubnetBackend(object):
         except ValueError:
             raise InvalidCIDRBlockParameterError(cidr_block)
         if not (
-            vpc_cidr_block.network_address <= subnet_cidr_block.network_address
-            and vpc_cidr_block.broadcast_address >= subnet_cidr_block.broadcast_address
+                vpc_cidr_block.network_address <= subnet_cidr_block.network_address
+                and vpc_cidr_block.broadcast_address >= subnet_cidr_block.broadcast_address
         ):
             raise InvalidSubnetRangeError(cidr_block)
 
@@ -3171,7 +3179,7 @@ class SubnetRouteTableAssociation(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -3209,7 +3217,7 @@ class RouteTable(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -3344,15 +3352,15 @@ class RouteTableBackend(object):
 
 class Route(object):
     def __init__(
-        self,
-        route_table,
-        destination_cidr_block,
-        local=False,
-        gateway=None,
-        instance=None,
-        nat_gateway=None,
-        interface=None,
-        vpc_pcx=None,
+            self,
+            route_table,
+            destination_cidr_block,
+            local=False,
+            gateway=None,
+            instance=None,
+            nat_gateway=None,
+            interface=None,
+            vpc_pcx=None,
     ):
         self.id = generate_route_id(route_table.id, destination_cidr_block)
         self.route_table = route_table
@@ -3366,7 +3374,7 @@ class Route(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -3395,15 +3403,15 @@ class RouteBackend(object):
         super(RouteBackend, self).__init__()
 
     def create_route(
-        self,
-        route_table_id,
-        destination_cidr_block,
-        local=False,
-        gateway_id=None,
-        instance_id=None,
-        nat_gateway_id=None,
-        interface_id=None,
-        vpc_peering_connection_id=None,
+            self,
+            route_table_id,
+            destination_cidr_block,
+            local=False,
+            gateway_id=None,
+            instance_id=None,
+            nat_gateway_id=None,
+            interface_id=None,
+            vpc_peering_connection_id=None,
     ):
         route_table = self.get_route_table(route_table_id)
 
@@ -3442,13 +3450,13 @@ class RouteBackend(object):
         return route
 
     def replace_route(
-        self,
-        route_table_id,
-        destination_cidr_block,
-        gateway_id=None,
-        instance_id=None,
-        interface_id=None,
-        vpc_peering_connection_id=None,
+            self,
+            route_table_id,
+            destination_cidr_block,
+            gateway_id=None,
+            instance_id=None,
+            interface_id=None,
+            vpc_peering_connection_id=None,
     ):
         route_table = self.get_route_table(route_table_id)
         route_id = generate_route_id(route_table.id, destination_cidr_block)
@@ -3497,7 +3505,7 @@ class InternetGateway(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         ec2_backend = ec2_backends[region_name]
         return ec2_backend.create_internet_gateway()
@@ -3574,7 +3582,7 @@ class VPCGatewayAttachment(BaseModel):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
 
@@ -3605,28 +3613,28 @@ class VPCGatewayAttachmentBackend(object):
 
 class SpotInstanceRequest(BotoSpotRequest, TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        spot_request_id,
-        price,
-        image_id,
-        type,
-        valid_from,
-        valid_until,
-        launch_group,
-        availability_zone_group,
-        key_name,
-        security_groups,
-        user_data,
-        instance_type,
-        placement,
-        kernel_id,
-        ramdisk_id,
-        monitoring_enabled,
-        subnet_id,
-        tags,
-        spot_fleet_id,
-        **kwargs
+            self,
+            ec2_backend,
+            spot_request_id,
+            price,
+            image_id,
+            type,
+            valid_from,
+            valid_until,
+            launch_group,
+            availability_zone_group,
+            key_name,
+            security_groups,
+            user_data,
+            instance_type,
+            placement,
+            kernel_id,
+            ramdisk_id,
+            monitoring_enabled,
+            subnet_id,
+            tags,
+            spot_fleet_id,
+            **kwargs
     ):
         super(SpotInstanceRequest, self).__init__(**kwargs)
         ls = LaunchSpecification()
@@ -3698,26 +3706,26 @@ class SpotRequestBackend(object):
         super(SpotRequestBackend, self).__init__()
 
     def request_spot_instances(
-        self,
-        price,
-        image_id,
-        count,
-        type,
-        valid_from,
-        valid_until,
-        launch_group,
-        availability_zone_group,
-        key_name,
-        security_groups,
-        user_data,
-        instance_type,
-        placement,
-        kernel_id,
-        ramdisk_id,
-        monitoring_enabled,
-        subnet_id,
-        tags=None,
-        spot_fleet_id=None,
+            self,
+            price,
+            image_id,
+            count,
+            type,
+            valid_from,
+            valid_until,
+            launch_group,
+            availability_zone_group,
+            key_name,
+            security_groups,
+            user_data,
+            instance_type,
+            placement,
+            kernel_id,
+            ramdisk_id,
+            monitoring_enabled,
+            subnet_id,
+            tags=None,
+            spot_fleet_id=None,
     ):
         requests = []
         tags = tags or {}
@@ -3764,19 +3772,19 @@ class SpotRequestBackend(object):
 
 class SpotFleetLaunchSpec(object):
     def __init__(
-        self,
-        ebs_optimized,
-        group_set,
-        iam_instance_profile,
-        image_id,
-        instance_type,
-        key_name,
-        monitoring,
-        spot_price,
-        subnet_id,
-        tag_specifications,
-        user_data,
-        weighted_capacity,
+            self,
+            ebs_optimized,
+            group_set,
+            iam_instance_profile,
+            image_id,
+            instance_type,
+            key_name,
+            monitoring,
+            spot_price,
+            subnet_id,
+            tag_specifications,
+            user_data,
+            weighted_capacity,
     ):
         self.ebs_optimized = ebs_optimized
         self.group_set = group_set
@@ -3794,14 +3802,14 @@ class SpotFleetLaunchSpec(object):
 
 class SpotFleetRequest(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        spot_fleet_request_id,
-        spot_price,
-        target_capacity,
-        iam_fleet_role,
-        allocation_strategy,
-        launch_specs,
+            self,
+            ec2_backend,
+            spot_fleet_request_id,
+            spot_price,
+            target_capacity,
+            iam_fleet_role,
+            allocation_strategy,
+            launch_specs,
     ):
 
         self.ec2_backend = ec2_backend
@@ -3843,7 +3851,7 @@ class SpotFleetRequest(TaggedEC2Resource):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]["SpotFleetRequestConfigData"]
         ec2_backend = ec2_backends[region_name]
@@ -3882,7 +3890,7 @@ class SpotFleetRequest(TaggedEC2Resource):
             while True:
                 launch_spec = self.launch_specs[
                     launch_spec_index % len(self.launch_specs)
-                ]
+                    ]
                 weight_map[launch_spec] += 1
                 weight_so_far += launch_spec.weighted_capacity
                 if weight_so_far >= weight_to_add:
@@ -3895,7 +3903,7 @@ class SpotFleetRequest(TaggedEC2Resource):
                 key=lambda spec: float(spec.spot_price or "+inf"),
             )[0]
             weight_so_far = weight_to_add + (
-                weight_to_add % cheapest_spec.weighted_capacity
+                    weight_to_add % cheapest_spec.weighted_capacity
             )
             weight_map[cheapest_spec] = int(
                 weight_so_far // cheapest_spec.weighted_capacity
@@ -3938,8 +3946,8 @@ class SpotFleetRequest(TaggedEC2Resource):
             instance = req.instance
             for spec in self.launch_specs:
                 if (
-                    spec.instance_type == instance.instance_type
-                    and spec.subnet_id == instance.subnet_id
+                        spec.instance_type == instance.instance_type
+                        and spec.subnet_id == instance.subnet_id
                 ):
                     break
 
@@ -4000,12 +4008,12 @@ class SpotFleetBackend(object):
         super(SpotFleetBackend, self).__init__()
 
     def request_spot_fleet(
-        self,
-        spot_price,
-        target_capacity,
-        iam_fleet_role,
-        allocation_strategy,
-        launch_specs,
+            self,
+            spot_price,
+            target_capacity,
+            iam_fleet_role,
+            allocation_strategy,
+            launch_specs,
     ):
 
         spot_fleet_request_id = random_spot_fleet_request_id()
@@ -4050,7 +4058,7 @@ class SpotFleetBackend(object):
         return spot_requests
 
     def modify_spot_fleet_request(
-        self, spot_fleet_request_id, target_capacity, terminate_instances
+            self, spot_fleet_request_id, target_capacity, terminate_instances
     ):
         if target_capacity < 0:
             raise ValueError("Cannot reduce spot fleet capacity below 0")
@@ -4078,7 +4086,7 @@ class ElasticAddress(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         ec2_backend = ec2_backends[region_name]
 
@@ -4179,12 +4187,12 @@ class ElasticAddressBackend(object):
         return eips
 
     def associate_address(
-        self,
-        instance=None,
-        eni=None,
-        address=None,
-        allocation_id=None,
-        reassociate=False,
+            self,
+            instance=None,
+            eni=None,
+            address=None,
+            allocation_id=None,
+            reassociate=False,
     ):
         eips = []
         if address:
@@ -4264,13 +4272,13 @@ class ElasticAddressBackend(object):
 
 class DHCPOptionsSet(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        domain_name_servers=None,
-        domain_name=None,
-        ntp_servers=None,
-        netbios_name_servers=None,
-        netbios_node_type=None,
+            self,
+            ec2_backend,
+            domain_name_servers=None,
+            domain_name=None,
+            ntp_servers=None,
+            netbios_name_servers=None,
+            netbios_node_type=None,
     ):
         self.ec2_backend = ec2_backend
         self._options = {
@@ -4323,12 +4331,12 @@ class DHCPOptionsSetBackend(object):
         vpc.dhcp_options = dhcp_options
 
     def create_dhcp_options(
-        self,
-        domain_name_servers=None,
-        domain_name=None,
-        ntp_servers=None,
-        netbios_name_servers=None,
-        netbios_node_type=None,
+            self,
+            domain_name_servers=None,
+            domain_name=None,
+            ntp_servers=None,
+            netbios_name_servers=None,
+            netbios_node_type=None,
     ):
 
         NETBIOS_NODE_TYPES = [1, 2, 4, 8]
@@ -4422,7 +4430,7 @@ class VPNConnectionBackend(object):
         super(VPNConnectionBackend, self).__init__()
 
     def create_vpn_connection(
-        self, type, customer_gateway_id, vpn_gateway_id, static_routes_only=None
+            self, type, customer_gateway_id, vpn_gateway_id, static_routes_only=None
     ):
         vpn_connection_id = random_vpn_connection_id()
         if static_routes_only:
@@ -4541,23 +4549,23 @@ class NetworkAclBackend(object):
         return deleted
 
     def create_network_acl_entry(
-        self,
-        network_acl_id,
-        rule_number,
-        protocol,
-        rule_action,
-        egress,
-        cidr_block,
-        icmp_code,
-        icmp_type,
-        port_range_from,
-        port_range_to,
+            self,
+            network_acl_id,
+            rule_number,
+            protocol,
+            rule_action,
+            egress,
+            cidr_block,
+            icmp_code,
+            icmp_type,
+            port_range_from,
+            port_range_to,
     ):
 
         network_acl = self.get_network_acl(network_acl_id)
         if any(
-            entry.egress == egress and entry.rule_number == rule_number
-            for entry in network_acl.network_acl_entries
+                entry.egress == egress and entry.rule_number == rule_number
+                for entry in network_acl.network_acl_entries
         ):
             raise NetworkAclEntryAlreadyExistsError(rule_number)
         network_acl_entry = NetworkAclEntry(
@@ -4589,17 +4597,17 @@ class NetworkAclBackend(object):
         return entry
 
     def replace_network_acl_entry(
-        self,
-        network_acl_id,
-        rule_number,
-        protocol,
-        rule_action,
-        egress,
-        cidr_block,
-        icmp_code,
-        icmp_type,
-        port_range_from,
-        port_range_to,
+            self,
+            network_acl_id,
+            rule_number,
+            protocol,
+            rule_action,
+            egress,
+            cidr_block,
+            icmp_code,
+            icmp_type,
+            port_range_from,
+            port_range_to,
     ):
 
         self.delete_network_acl_entry(network_acl_id, rule_number, egress)
@@ -4689,18 +4697,18 @@ class NetworkAcl(TaggedEC2Resource):
 
 class NetworkAclEntry(TaggedEC2Resource):
     def __init__(
-        self,
-        ec2_backend,
-        network_acl_id,
-        rule_number,
-        protocol,
-        rule_action,
-        egress,
-        cidr_block,
-        icmp_code,
-        icmp_type,
-        port_range_from,
-        port_range_to,
+            self,
+            ec2_backend,
+            network_acl_id,
+            rule_number,
+            protocol,
+            rule_action,
+            egress,
+            cidr_block,
+            icmp_code,
+            icmp_type,
+            port_range_from,
+            port_range_to,
     ):
         self.ec2_backend = ec2_backend
         self.network_acl_id = network_acl_id
@@ -4865,7 +4873,7 @@ class NatGateway(object):
 
     @classmethod
     def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
+            cls, resource_name, cloudformation_json, region_name
     ):
         ec2_backend = ec2_backends[region_name]
         nat_gateway = ec2_backend.create_nat_gateway(
@@ -4994,7 +5002,7 @@ class LaunchTemplateBackend(object):
         return self.get_launch_template(self.launch_template_name_to_ids[name])
 
     def get_launch_templates(
-        self, template_names=None, template_ids=None, filters=None
+            self, template_names=None, template_ids=None, filters=None
     ):
         if template_names and not template_ids:
             template_ids = []
