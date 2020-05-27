@@ -21,6 +21,7 @@ import sure  # noqa
 
 from moto import (
     mock_autoscaling_deprecated,
+    mock_autoscaling,
     mock_cloudformation,
     mock_cloudformation_deprecated,
     mock_datapipeline_deprecated,
@@ -29,15 +30,18 @@ from moto import (
     mock_ec2_deprecated,
     mock_elb,
     mock_elb_deprecated,
+    mock_events,
     mock_iam_deprecated,
     mock_kms,
     mock_lambda,
+    mock_logs,
     mock_rds_deprecated,
     mock_rds2,
     mock_rds2_deprecated,
     mock_redshift,
     mock_redshift_deprecated,
     mock_route53_deprecated,
+    mock_s3,
     mock_sns_deprecated,
     mock_sqs,
     mock_sqs_deprecated,
@@ -46,7 +50,7 @@ from moto import (
 from moto.core import ACCOUNT_ID
 from moto.dynamodb2.models import Table
 
-from .fixtures import (
+from tests.test_cloudformation.fixtures import (
     ec2_classic_eip,
     fn_join,
     rds_mysql_with_db_parameter_group,
@@ -492,7 +496,7 @@ def test_autoscaling_group_with_elb():
             "my-as-group": {
                 "Type": "AWS::AutoScaling::AutoScalingGroup",
                 "Properties": {
-                    "AvailabilityZones": ["us-east1"],
+                    "AvailabilityZones": ["us-east-1a"],
                     "LaunchConfigurationName": {"Ref": "my-launch-config"},
                     "MinSize": "2",
                     "MaxSize": "2",
@@ -519,7 +523,7 @@ def test_autoscaling_group_with_elb():
             "my-elb": {
                 "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
                 "Properties": {
-                    "AvailabilityZones": ["us-east1"],
+                    "AvailabilityZones": ["us-east-1a"],
                     "Listeners": [
                         {
                             "LoadBalancerPort": "80",
@@ -542,10 +546,10 @@ def test_autoscaling_group_with_elb():
 
     web_setup_template_json = json.dumps(web_setup_template)
 
-    conn = boto.cloudformation.connect_to_region("us-west-1")
+    conn = boto.cloudformation.connect_to_region("us-east-1")
     conn.create_stack("web_stack", template_body=web_setup_template_json)
 
-    autoscale_conn = boto.ec2.autoscale.connect_to_region("us-west-1")
+    autoscale_conn = boto.ec2.autoscale.connect_to_region("us-east-1")
     autoscale_group = autoscale_conn.get_all_groups()[0]
     autoscale_group.launch_config_name.should.contain("my-launch-config")
     autoscale_group.load_balancers[0].should.equal("my-elb")
@@ -554,7 +558,7 @@ def test_autoscaling_group_with_elb():
     autoscale_conn.get_all_launch_configurations().should.have.length_of(1)
 
     # Confirm the ELB was actually created
-    elb_conn = boto.ec2.elb.connect_to_region("us-west-1")
+    elb_conn = boto.ec2.elb.connect_to_region("us-east-1")
     elb_conn.get_all_load_balancers().should.have.length_of(1)
 
     stack = conn.describe_stacks()[0]
@@ -581,7 +585,7 @@ def test_autoscaling_group_with_elb():
     elb_resource.physical_resource_id.should.contain("my-elb")
 
     # confirm the instances were created with the right tags
-    ec2_conn = boto.ec2.connect_to_region("us-west-1")
+    ec2_conn = boto.ec2.connect_to_region("us-east-1")
     reservations = ec2_conn.get_all_reservations()
     len(reservations).should.equal(1)
     reservation = reservations[0]
@@ -601,7 +605,7 @@ def test_autoscaling_group_update():
             "my-as-group": {
                 "Type": "AWS::AutoScaling::AutoScalingGroup",
                 "Properties": {
-                    "AvailabilityZones": ["us-west-1"],
+                    "AvailabilityZones": ["us-west-1a"],
                     "LaunchConfigurationName": {"Ref": "my-launch-config"},
                     "MinSize": "2",
                     "MaxSize": "2",
@@ -909,6 +913,7 @@ def test_iam_roles():
             },
             "my-role-no-path": {
                 "Properties": {
+                    "RoleName": "my-role-no-path-name",
                     "AssumeRolePolicyDocument": {
                         "Statement": [
                             {
@@ -917,7 +922,7 @@ def test_iam_roles():
                                 "Principal": {"Service": ["ec2.amazonaws.com"]},
                             }
                         ]
-                    }
+                    },
                 },
                 "Type": "AWS::IAM::Role",
             },
@@ -936,13 +941,13 @@ def test_iam_roles():
     role_name_to_id = {}
     for role_result in role_results:
         role = iam_conn.get_role(role_result.role_name)
-        role.role_name.should.contain("my-role")
+        # Role name is not specified, so randomly generated - can't check exact name
         if "with-path" in role.role_name:
             role_name_to_id["with-path"] = role.role_id
             role.path.should.equal("my-path")
         else:
             role_name_to_id["no-path"] = role.role_id
-            role.role_name.should.contain("no-path")
+            role.role_name.should.equal("my-role-no-path-name")
             role.path.should.equal("/")
 
     instance_profile_responses = iam_conn.list_instance_profiles()[
@@ -2329,3 +2334,220 @@ def test_stack_dynamodb_resources_integration():
     response["Item"]["Sales"].should.equal(Decimal("10"))
     response["Item"]["NumberOfSongs"].should.equal(Decimal("5"))
     response["Item"]["Album"].should.equal("myAlbum")
+
+
+@mock_cloudformation
+@mock_logs
+@mock_s3
+def test_create_log_group_using_fntransform():
+    s3_resource = boto3.resource("s3")
+    s3_resource.create_bucket(
+        Bucket="owi-common-cf",
+        CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+    )
+    s3_resource.Object("owi-common-cf", "snippets/test.json").put(
+        Body=json.dumps({"lgname": {"name": "some-log-group"}})
+    )
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Mappings": {
+            "EnvironmentMapping": {
+                "Fn::Transform": {
+                    "Name": "AWS::Include",
+                    "Parameters": {"Location": "s3://owi-common-cf/snippets/test.json"},
+                }
+            }
+        },
+        "Resources": {
+            "LogGroup": {
+                "Properties": {
+                    "LogGroupName": {
+                        "Fn::FindInMap": ["EnvironmentMapping", "lgname", "name"]
+                    },
+                    "RetentionInDays": 90,
+                },
+                "Type": "AWS::Logs::LogGroup",
+            }
+        },
+    }
+
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=json.dumps(template))
+
+    logs_conn = boto3.client("logs", region_name="us-west-2")
+    log_group = logs_conn.describe_log_groups()["logGroups"][0]
+    log_group["logGroupName"].should.equal("some-log-group")
+    log_group["retentionInDays"].should.be.equal(90)
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_create_rule_integration():
+    events_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Event": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "Name": "quick-fox",
+                    "State": "ENABLED",
+                    "ScheduleExpression": "rate(5 minutes)",
+                },
+            }
+        },
+    }
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(
+        StackName="test_stack", TemplateBody=json.dumps(events_template)
+    )
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    rules["Rules"].should.have.length_of(1)
+    rules["Rules"][0]["Name"].should.equal("quick-fox")
+    rules["Rules"][0]["State"].should.equal("ENABLED")
+    rules["Rules"][0]["ScheduleExpression"].should.equal("rate(5 minutes)")
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_delete_rule_integration():
+    events_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Event": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "Name": "quick-fox",
+                    "State": "ENABLED",
+                    "ScheduleExpression": "rate(5 minutes)",
+                },
+            }
+        },
+    }
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(
+        StackName="test_stack", TemplateBody=json.dumps(events_template)
+    )
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    rules["Rules"].should.have.length_of(1)
+
+    cf_conn.delete_stack(StackName="test_stack")
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    rules["Rules"].should.have.length_of(0)
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_create_rule_without_name_integration():
+    events_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Event": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "State": "ENABLED",
+                    "ScheduleExpression": "rate(5 minutes)",
+                },
+            }
+        },
+    }
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(
+        StackName="test_stack", TemplateBody=json.dumps(events_template)
+    )
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    rules["Rules"][0]["Name"].should.contain("test_stack-Event-")
+
+
+@mock_cloudformation
+@mock_events
+@mock_logs
+def test_stack_events_create_rule_as_target():
+    events_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "SecurityGroup": {
+                "Type": "AWS::Logs::LogGroup",
+                "Properties": {
+                    "LogGroupName": {"Fn::GetAtt": ["Event", "Arn"]},
+                    "RetentionInDays": 3,
+                },
+            },
+            "Event": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "State": "ENABLED",
+                    "ScheduleExpression": "rate(5 minutes)",
+                },
+            },
+        },
+    }
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(
+        StackName="test_stack", TemplateBody=json.dumps(events_template)
+    )
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    log_groups = boto3.client("logs", "us-west-2").describe_log_groups()
+
+    rules["Rules"][0]["Name"].should.contain("test_stack-Event-")
+
+    log_groups["logGroups"][0]["logGroupName"].should.equal(rules["Rules"][0]["Arn"])
+    log_groups["logGroups"][0]["retentionInDays"].should.equal(3)
+
+
+@mock_cloudformation
+@mock_autoscaling
+def test_autoscaling_propagate_tags():
+    autoscaling_group_with_tags = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "AutoScalingGroup": {
+                "Type": "AWS::AutoScaling::AutoScalingGroup",
+                "Properties": {
+                    "AutoScalingGroupName": "test-scaling-group",
+                    "DesiredCapacity": 1,
+                    "MinSize": 1,
+                    "MaxSize": 50,
+                    "LaunchConfigurationName": "test-launch-config",
+                    "AvailabilityZones": ["us-east-1a"],
+                    "Tags": [
+                        {
+                            "Key": "test-key-propagate",
+                            "Value": "test",
+                            "PropagateAtLaunch": True,
+                        },
+                        {
+                            "Key": "test-key-no-propagate",
+                            "Value": "test",
+                            "PropagateAtLaunch": False,
+                        },
+                    ],
+                },
+                "DependsOn": "LaunchConfig",
+            },
+            "LaunchConfig": {
+                "Type": "AWS::AutoScaling::LaunchConfiguration",
+                "Properties": {"LaunchConfigurationName": "test-launch-config"},
+            },
+        },
+    }
+    boto3.client("cloudformation", "us-east-1").create_stack(
+        StackName="propagate_tags_test",
+        TemplateBody=json.dumps(autoscaling_group_with_tags),
+    )
+
+    autoscaling = boto3.client("autoscaling", "us-east-1")
+
+    autoscaling_group_tags = autoscaling.describe_auto_scaling_groups()[
+        "AutoScalingGroups"
+    ][0]["Tags"]
+    propagation_dict = {
+        tag["Key"]: tag["PropagateAtLaunch"] for tag in autoscaling_group_tags
+    }
+
+    assert propagation_dict["test-key-propagate"]
+    assert not propagation_dict["test-key-no-propagate"]

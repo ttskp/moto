@@ -70,7 +70,9 @@ from .exceptions import (
     InvalidSubnetIdError,
     InvalidSubnetRangeError,
     InvalidVolumeIdError,
+    VolumeInUseError,
     InvalidVolumeAttachmentError,
+    InvalidVolumeDetachmentError,
     InvalidVpcCidrBlockAssociationIdError,
     InvalidVPCPeeringConnectionIdError,
     InvalidVPCPeeringConnectionStateTransitionError,
@@ -103,6 +105,7 @@ from .utils import (
     random_internet_gateway_id,
     random_ip,
     random_ipv6_cidr,
+    randor_ipv4_cidr,
     random_launch_template_id,
     random_nat_gateway_id,
     random_key_pair,
@@ -111,6 +114,8 @@ from .utils import (
     random_reservation_id,
     random_route_table_id,
     generate_route_id,
+    generate_vpc_end_point_id,
+    create_dns_entries,
     split_route_id,
     random_security_group_id,
     random_snapshot_id,
@@ -555,16 +560,34 @@ class Instance(TaggedEC2Resource, BotoInstance):
             # worst case we'll get IP address exaustion... rarely
             pass
 
+    def add_block_device(
+        self,
+        size,
+        device_path,
+        snapshot_id=None,
+        encrypted=False,
+        delete_on_termination=False,
+    ):
+        volume = self.ec2_backend.create_volume(
+            size, self.region_name, snapshot_id, encrypted
+        )
+        self.ec2_backend.attach_volume(
+            volume.id, self.id, device_path, delete_on_termination
+        )
+
     def setup_defaults(self):
         # Default have an instance with root volume should you not wish to
         # override with attach volume cmd.
         volume = self.ec2_backend.create_volume(8, "us-east-1a")
-        self.ec2_backend.attach_volume(volume.id, self.id, "/dev/sda1")
+        self.ec2_backend.attach_volume(volume.id, self.id, "/dev/sda1", True)
 
     def teardown_defaults(self):
-        volume_id = self.block_device_mapping["/dev/sda1"].volume_id
-        self.ec2_backend.detach_volume(volume_id, self.id, "/dev/sda1")
-        self.ec2_backend.delete_volume(volume_id)
+        for device_path in list(self.block_device_mapping.keys()):
+            volume = self.block_device_mapping[device_path]
+            volume_id = volume.volume_id
+            self.ec2_backend.detach_volume(volume_id, self.id, device_path)
+            if volume.delete_on_termination:
+                self.ec2_backend.delete_volume(volume_id)
 
     @property
     def get_block_device_mapping(self):
@@ -619,6 +642,7 @@ class Instance(TaggedEC2Resource, BotoInstance):
             subnet_id=properties.get("SubnetId"),
             key_name=properties.get("KeyName"),
             private_ip=properties.get("PrivateIpAddress"),
+            block_device_mappings=properties.get("BlockDeviceMappings", {}),
         )
         instance = reservation.instances[0]
         for tag in properties.get("Tags", []):
@@ -774,7 +798,14 @@ class Instance(TaggedEC2Resource, BotoInstance):
                 if "SubnetId" in nic:
                     subnet = self.ec2_backend.get_subnet(nic["SubnetId"])
                 else:
-                    subnet = None
+                    # Get default Subnet
+                    subnet = [
+                        subnet
+                        for subnet in self.ec2_backend.get_all_subnets(
+                            filters={"availabilityZone": self._placement.zone}
+                        )
+                        if subnet.default_for_az
+                    ][0]
 
                 group_id = nic.get("SecurityGroupId")
                 group_ids = [group_id] if group_id else []
@@ -821,6 +852,21 @@ class Instance(TaggedEC2Resource, BotoInstance):
             return self.public_ip
         raise UnformattedGetAttTemplateException()
 
+    def applies(self, filters):
+        if filters:
+            applicable = False
+            for f in filters:
+                acceptable_values = f["values"]
+                if f["name"] == "instance-state-name":
+                    if self._state.name in acceptable_values:
+                        applicable = True
+                if f["name"] == "instance-state-code":
+                    if str(self._state.code) in acceptable_values:
+                        applicable = True
+            return applicable
+        # If there are no filters, all instances are valid
+        return True
+
 
 class InstanceBackend(object):
     def __init__(self):
@@ -856,7 +902,25 @@ class InstanceBackend(object):
             )
             new_reservation.instances.append(new_instance)
             new_instance.add_tags(instance_tags)
-            new_instance.setup_defaults()
+            if "block_device_mappings" in kwargs:
+                for block_device in kwargs["block_device_mappings"]:
+                    device_name = block_device["DeviceName"]
+                    volume_size = block_device["Ebs"].get("VolumeSize")
+                    snapshot_id = block_device["Ebs"].get("SnapshotId")
+                    encrypted = block_device["Ebs"].get("Encrypted", False)
+                    delete_on_termination = block_device["Ebs"].get(
+                        "DeleteOnTermination", False
+                    )
+                    new_instance.add_block_device(
+                        volume_size,
+                        device_name,
+                        snapshot_id,
+                        encrypted,
+                        delete_on_termination,
+                    )
+            else:
+                new_instance.setup_defaults()
+
         return new_reservation
 
     def start_instances(self, instance_ids):
@@ -920,22 +984,29 @@ class InstanceBackend(object):
         value = getattr(instance, key)
         return instance, value
 
-    def all_instances(self):
-        instances = []
-        for reservation in self.all_reservations():
-            for instance in reservation.instances:
-                instances.append(instance)
-        return instances
+    def describe_instance_credit_specifications(self, instance_ids):
+        queried_instances = []
+        for instance in self.get_multi_instances_by_id(instance_ids):
+            queried_instances.append(instance)
+        return queried_instances
 
-    def all_running_instances(self):
+    def all_instances(self, filters=None):
         instances = []
         for reservation in self.all_reservations():
             for instance in reservation.instances:
-                if instance.state_code == 16:
+                if instance.applies(filters):
                     instances.append(instance)
         return instances
 
-    def get_multi_instances_by_id(self, instance_ids):
+    def all_running_instances(self, filters=None):
+        instances = []
+        for reservation in self.all_reservations():
+            for instance in reservation.instances:
+                if instance.state_code == 16 and instance.applies(filters):
+                    instances.append(instance)
+        return instances
+
+    def get_multi_instances_by_id(self, instance_ids, filters=None):
         """
         :param instance_ids: A string list with instance ids
         :return: A list with instance objects
@@ -945,7 +1016,8 @@ class InstanceBackend(object):
         for reservation in self.all_reservations():
             for instance in reservation.instances:
                 if instance.id in instance_ids:
-                    result.append(instance)
+                    if instance.applies(filters):
+                        result.append(instance)
 
         # TODO: Trim error message down to specific invalid id.
         if instance_ids and len(instance_ids) > len(result):
@@ -1457,9 +1529,10 @@ class AmiBackend(object):
 
 
 class Region(object):
-    def __init__(self, name, endpoint):
+    def __init__(self, name, endpoint, opt_in_status):
         self.name = name
         self.endpoint = endpoint
+        self.opt_in_status = opt_in_status
 
 
 class Zone(object):
@@ -1470,13 +1543,50 @@ class Zone(object):
 
 
 class RegionsAndZonesBackend(object):
+    regions_opt_in_not_required = [
+        "af-south-1",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ca-central-1",
+        "eu-central-1",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+    ]
+
     regions = []
     for region in Session().get_available_regions("ec2"):
-        regions.append(Region(region, "ec2.{}.amazonaws.com".format(region)))
+        if region in regions_opt_in_not_required:
+            regions.append(
+                Region(
+                    region, "ec2.{}.amazonaws.com".format(region), "opt-in-not-required"
+                )
+            )
+        else:
+            regions.append(
+                Region(region, "ec2.{}.amazonaws.com".format(region), "not-opted-in")
+            )
     for region in Session().get_available_regions("ec2", partition_name="aws-us-gov"):
-        regions.append(Region(region, "ec2.{}.amazonaws.com".format(region)))
+        regions.append(
+            Region(region, "ec2.{}.amazonaws.com".format(region), "opt-in-not-required")
+        )
     for region in Session().get_available_regions("ec2", partition_name="aws-cn"):
-        regions.append(Region(region, "ec2.{}.amazonaws.com.cn".format(region)))
+        regions.append(
+            Region(
+                region, "ec2.{}.amazonaws.com.cn".format(region), "opt-in-not-required"
+            )
+        )
 
     zones = {
         "af-south-1": [
@@ -1729,6 +1839,12 @@ class SecurityGroup(TaggedEC2Resource):
         self.enis = {}
         self.vpc_id = vpc_id
         self.owner_id = OWNER_ID
+
+        # Append default IPv6 egress rule for VPCs with IPv6 support
+        if vpc_id:
+            vpc = self.ec2_backend.vpcs.get(vpc_id)
+            if vpc and len(vpc.get_cidr_block_association_set(ipv6=True)) > 0:
+                self.egress_rules.append(SecurityRule("-1", None, None, [], []))
 
     @classmethod
     def create_from_cloudformation_json(
@@ -2370,10 +2486,15 @@ class EBSBackend(object):
 
     def delete_volume(self, volume_id):
         if volume_id in self.volumes:
+            volume = self.volumes[volume_id]
+            if volume.attachment:
+                raise VolumeInUseError(volume_id, volume.attachment.instance.id)
             return self.volumes.pop(volume_id)
         raise InvalidVolumeIdError(volume_id)
 
-    def attach_volume(self, volume_id, instance_id, device_path):
+    def attach_volume(
+        self, volume_id, instance_id, device_path, delete_on_termination=False
+    ):
         volume = self.get_volume(volume_id)
         instance = self.get_instance(instance_id)
 
@@ -2387,17 +2508,25 @@ class EBSBackend(object):
             status=volume.status,
             size=volume.size,
             attach_time=utc_date_and_time(),
+            delete_on_termination=delete_on_termination,
         )
         instance.block_device_mapping[device_path] = bdt
         return volume.attachment
 
     def detach_volume(self, volume_id, instance_id, device_path):
         volume = self.get_volume(volume_id)
-        self.get_instance(instance_id)
+        instance = self.get_instance(instance_id)
 
         old_attachment = volume.attachment
         if not old_attachment:
             raise InvalidVolumeAttachmentError(volume_id, instance_id)
+        device_path = device_path or old_attachment.device
+
+        try:
+            del instance.block_device_mapping[device_path]
+        except KeyError:
+            raise InvalidVolumeDetachmentError(volume_id, instance_id, device_path)
+
         old_attachment.status = "detached"
 
         volume.attachment = None
@@ -2648,6 +2777,7 @@ class VPCBackend(object):
 
     def __init__(self):
         self.vpcs = {}
+        self.vpc_end_points = {}
         self.vpc_refs[self.__class__].add(weakref.ref(self))
         super(VPCBackend, self).__init__()
 
@@ -2789,6 +2919,66 @@ class VPCBackend(object):
     ):
         vpc = self.get_vpc(vpc_id)
         return vpc.associate_vpc_cidr_block(cidr_block, amazon_provided_ipv6_cidr_block)
+
+    def create_vpc_endpoint(
+        self,
+        vpc_id,
+        service_name,
+        type=None,
+        policy_document=False,
+        route_table_ids=None,
+        subnet_ids=[],
+        network_interface_ids=[],
+        dns_entries=None,
+        client_token=None,
+        security_group=None,
+        tag_specifications=None,
+        private_dns_enabled=None,
+    ):
+
+        vpc_endpoint_id = generate_vpc_end_point_id(vpc_id)
+
+        # validates if vpc is present or not.
+        self.get_vpc(vpc_id)
+
+        if type and type.lower() == "interface":
+
+            network_interface_ids = []
+            for subnet_id in subnet_ids:
+                self.get_subnet(subnet_id)
+                eni = self.create_network_interface(subnet_id, random_private_ip())
+                network_interface_ids.append(eni.id)
+
+            dns_entries = create_dns_entries(service_name, vpc_endpoint_id)
+
+        else:
+            # considering gateway if type is not mentioned.
+            service_destination_cidr = randor_ipv4_cidr()
+
+            for route_table_id in route_table_ids:
+                self.create_route(route_table_id, service_destination_cidr)
+        if dns_entries:
+            dns_entries = [dns_entries]
+
+        vpc_end_point = VPCEndPoint(
+            vpc_endpoint_id,
+            vpc_id,
+            service_name,
+            type,
+            policy_document,
+            route_table_ids,
+            subnet_ids,
+            network_interface_ids,
+            dns_entries,
+            client_token,
+            security_group,
+            tag_specifications,
+            private_dns_enabled,
+        )
+
+        self.vpc_end_points[vpc_endpoint_id] = vpc_end_point
+
+        return vpc_end_point
 
 
 class VPCPeeringConnectionStatus(object):
@@ -3396,6 +3586,40 @@ class Route(object):
             vpc_peering_connection_id=pcx_id,
         )
         return route_table
+
+
+class VPCEndPoint(TaggedEC2Resource):
+    def __init__(
+        self,
+        id,
+        vpc_id,
+        service_name,
+        type=None,
+        policy_document=False,
+        route_table_ids=None,
+        subnet_ids=None,
+        network_interface_ids=None,
+        dns_entries=None,
+        client_token=None,
+        security_group=None,
+        tag_specifications=None,
+        private_dns_enabled=None,
+    ):
+
+        self.id = id
+        self.vpc_id = vpc_id
+        self.service_name = service_name
+        self.type = type
+        self.policy_document = policy_document
+        self.route_table_ids = route_table_ids
+        self.network_interface_ids = network_interface_ids
+        self.subnet_ids = subnet_ids
+        self.client_token = client_token
+        self.security_group = security_group
+        self.tag_specifications = tag_specifications
+        self.private_dns_enabled = private_dns_enabled
+        self.created_at = datetime.utcnow()
+        self.dns_entries = dns_entries
 
 
 class RouteBackend(object):
@@ -4524,23 +4748,7 @@ class NetworkAclBackend(object):
             )
 
     def get_all_network_acls(self, network_acl_ids=None, filters=None):
-        network_acls = self.network_acls.values()
-
-        if network_acl_ids:
-            network_acls = [
-                network_acl
-                for network_acl in network_acls
-                if network_acl.id in network_acl_ids
-            ]
-            if len(network_acls) != len(network_acl_ids):
-                invalid_id = list(
-                    set(network_acl_ids).difference(
-                        set([network_acl.id for network_acl in network_acls])
-                    )
-                )[0]
-                raise InvalidRouteTableIdError(invalid_id)
-
-        return generic_filter(filters, network_acls)
+        self.describe_network_acls(network_acl_ids, filters)
 
     def delete_network_acl(self, network_acl_id):
         deleted = self.network_acls.pop(network_acl_id, None)
@@ -4659,6 +4867,25 @@ class NetworkAclBackend(object):
         acl.associations[association_id] = NetworkAclAssociation(
             self, association_id, subnet_id, acl.id
         )
+
+    def describe_network_acls(self, network_acl_ids=None, filters=None):
+        network_acls = self.network_acls.values()
+
+        if network_acl_ids:
+            network_acls = [
+                network_acl
+                for network_acl in network_acls
+                if network_acl.id in network_acl_ids
+            ]
+            if len(network_acls) != len(network_acl_ids):
+                invalid_id = list(
+                    set(network_acl_ids).difference(
+                        set([network_acl.id for network_acl in network_acls])
+                    )
+                )[0]
+                raise InvalidRouteTableIdError(invalid_id)
+
+        return generic_filter(filters, network_acls)
 
 
 class NetworkAclAssociation(object):

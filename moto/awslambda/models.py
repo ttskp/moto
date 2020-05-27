@@ -5,6 +5,8 @@ import time
 from collections import defaultdict
 import copy
 import datetime
+from gzip import GzipFile
+
 import docker
 import docker.errors
 import hashlib
@@ -379,6 +381,7 @@ class LambdaFunction(BaseModel):
             event = dict()
         if context is None:
             context = {}
+        output = None
 
         try:
             # TODO: I believe we can keep the container running and feed events as needed
@@ -394,7 +397,7 @@ class LambdaFunction(BaseModel):
 
             env_vars.update(self.environment_vars)
 
-            container = output = exit_code = None
+            container = exit_code = None
             log_config = docker.types.LogConfig(type=docker.types.LogConfig.types.JSON)
             with _DockerDataVolumeContext(self) as data_vol:
                 try:
@@ -455,24 +458,28 @@ class LambdaFunction(BaseModel):
 
             # We only care about the response from the lambda
             # Which is the last line of the output, according to https://github.com/lambci/docker-lambda/issues/25
-            output = output.splitlines()[-1]
-            return output, False
+            resp = output.splitlines()[-1]
+            logs = os.linesep.join(
+                [line for line in self.convert(output).splitlines()[:-1]]
+            )
+            return resp, False, logs
         except BaseException as e:
             traceback.print_exc()
-            return "error running lambda: {}".format(e), True
+            logs = os.linesep.join(
+                [line for line in self.convert(output).splitlines()[:-1]]
+            )
+            return "error running lambda: {}".format(e), True, logs
 
     def invoke(self, body, request_headers, response_headers):
-        payload = dict()
 
         if body:
             body = json.loads(body)
 
         # Get the invocation type:
-        res, errored = self._invoke_lambda(code=self.code, event=body)
+        res, errored, logs = self._invoke_lambda(code=self.code, event=body)
         if request_headers.get("x-amz-invocation-type") == "RequestResponse":
-            encoded = base64.b64encode(res.encode("utf-8"))
+            encoded = base64.b64encode(logs.encode("utf-8"))
             response_headers["x-amz-log-result"] = encoded.decode("utf-8")
-            payload["result"] = response_headers["x-amz-log-result"]
             result = res.encode("utf-8")
         else:
             result = res
@@ -981,7 +988,29 @@ class LambdaBackend(BaseBackend):
             ]
         }
         func = self._lambdas.get_arn(function_arn)
-        func.invoke(json.dumps(event), {}, {})
+        return func.invoke(json.dumps(event), {}, {})
+
+    def send_log_event(
+        self, function_arn, filter_name, log_group_name, log_stream_name, log_events
+    ):
+        data = {
+            "messageType": "DATA_MESSAGE",
+            "owner": ACCOUNT_ID,
+            "logGroup": log_group_name,
+            "logStream": log_stream_name,
+            "subscriptionFilters": [filter_name],
+            "logEvents": log_events,
+        }
+
+        output = io.BytesIO()
+        with GzipFile(fileobj=output, mode="w") as f:
+            f.write(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+        payload_gz_encoded = base64.b64encode(output.getvalue()).decode("utf-8")
+
+        event = {"awslogs": {"data": payload_gz_encoded}}
+
+        func = self._lambdas.get_arn(function_arn)
+        return func.invoke(json.dumps(event), {}, {})
 
     def list_tags(self, resource):
         return self.get_function_by_arn(resource).tags
@@ -1006,11 +1035,11 @@ class LambdaBackend(BaseBackend):
             return True
         return False
 
-    def add_policy_statement(self, function_name, raw):
+    def add_permission(self, function_name, raw):
         fn = self.get_function(function_name)
         fn.policy.add_statement(raw)
 
-    def del_policy_statement(self, function_name, sid, revision=""):
+    def remove_permission(self, function_name, sid, revision=""):
         fn = self.get_function(function_name)
         fn.policy.del_statement(sid, revision)
 
@@ -1044,9 +1073,9 @@ class LambdaBackend(BaseBackend):
         if fn:
             payload = fn.invoke(body, headers, response_headers)
             response_headers["Content-Length"] = str(len(payload))
-            return response_headers, payload
+            return payload
         else:
-            return response_headers, None
+            return None
 
 
 def do_validate_s3():

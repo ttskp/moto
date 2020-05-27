@@ -146,7 +146,7 @@ class LambdaResponse(BaseResponse):
         function_name = path.split("/")[-2]
         if self.lambda_backend.get_function(function_name):
             statement = self.body
-            self.lambda_backend.add_policy_statement(function_name, statement)
+            self.lambda_backend.add_permission(function_name, statement)
             return 200, {}, json.dumps({"Statement": statement})
         else:
             return 404, {}, "{}"
@@ -166,9 +166,7 @@ class LambdaResponse(BaseResponse):
         statement_id = path.split("/")[-1].split("?")[0]
         revision = querystring.get("RevisionId", "")
         if self.lambda_backend.get_function(function_name):
-            self.lambda_backend.del_policy_statement(
-                function_name, statement_id, revision
-            )
+            self.lambda_backend.remove_permission(function_name, statement_id, revision)
             return 204, {}, "{}"
         else:
             return 404, {}, "{}"
@@ -180,15 +178,17 @@ class LambdaResponse(BaseResponse):
         function_name = unquote(self.path.rsplit("/", 2)[-2])
         qualifier = self._get_param("qualifier")
 
-        response_header, payload = self.lambda_backend.invoke(
+        payload = self.lambda_backend.invoke(
             function_name, qualifier, self.body, self.headers, response_headers
         )
         if payload:
-            if request.headers["X-Amz-Invocation-Type"] == "Event":
+            if request.headers.get("X-Amz-Invocation-Type") == "Event":
                 status_code = 202
-            elif request.headers["X-Amz-Invocation-Type"] == "DryRun":
+            elif request.headers.get("X-Amz-Invocation-Type") == "DryRun":
                 status_code = 204
             else:
+                if request.headers.get("X-Amz-Log-Type") != "Tail":
+                    del response_headers["x-amz-log-result"]
                 status_code = 200
             return status_code, response_headers, payload
         else:

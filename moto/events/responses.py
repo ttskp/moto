@@ -62,7 +62,9 @@ class EventsHandler(BaseResponse):
         rule = self.events_backend.describe_rule(name)
 
         if not rule:
-            return self.error("ResourceNotFoundException", "Rule test does not exist.")
+            return self.error(
+                "ResourceNotFoundException", "Rule " + name + " does not exist."
+            )
 
         rule_dict = self._generate_rule_dict(rule)
         return json.dumps(rule_dict), self.response_headers
@@ -189,7 +191,7 @@ class EventsHandler(BaseResponse):
                     "ValidationException", "Parameter ScheduleExpression is not valid."
                 )
 
-        rule_arn = self.events_backend.put_rule(
+        rule = self.events_backend.put_rule(
             name,
             ScheduleExpression=sched_exp,
             EventPattern=event_pattern,
@@ -198,7 +200,7 @@ class EventsHandler(BaseResponse):
             RoleArn=role_arn,
         )
 
-        return json.dumps({"RuleArn": rule_arn}), self.response_headers
+        return json.dumps({"RuleArn": rule.arn}), self.response_headers
 
     def put_targets(self):
         rule_name = self._get_param("Rule")

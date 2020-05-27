@@ -4,9 +4,15 @@ from boto.ec2.instancetype import InstanceType
 from moto.autoscaling import autoscaling_backends
 from moto.core.responses import BaseResponse
 from moto.core.utils import camelcase_to_underscores
-from moto.ec2.utils import filters_from_querystring, dict_from_querystring
+from moto.ec2.exceptions import MissingParameterError
+from moto.ec2.utils import (
+    filters_from_querystring,
+    dict_from_querystring,
+)
 from moto.elbv2 import elbv2_backends
 from moto.core import ACCOUNT_ID
+
+from copy import deepcopy
 
 
 class InstanceResponse(BaseResponse):
@@ -44,40 +50,31 @@ class InstanceResponse(BaseResponse):
         owner_id = self._get_param("OwnerId")
         user_data = self._get_param("UserData")
         security_group_names = self._get_multi_param("SecurityGroup")
-        security_group_ids = self._get_multi_param("SecurityGroupId")
-        nics = dict_from_querystring("NetworkInterface", self.querystring)
-        instance_type = self._get_param("InstanceType", if_none="m1.small")
-        placement = self._get_param("Placement.AvailabilityZone")
-        subnet_id = self._get_param("SubnetId")
-        private_ip = self._get_param("PrivateIpAddress")
-        associate_public_ip = self._get_param("AssociatePublicIpAddress")
-        key_name = self._get_param("KeyName")
-        ebs_optimized = self._get_param("EbsOptimized")
-        instance_initiated_shutdown_behavior = self._get_param(
-            "InstanceInitiatedShutdownBehavior"
-        )
-        tags = self._parse_tag_specification("TagSpecification")
-        region_name = self.region
+        kwargs = {
+            "instance_type": self._get_param("InstanceType", if_none="m1.small"),
+            "placement": self._get_param("Placement.AvailabilityZone"),
+            "region_name": self.region,
+            "subnet_id": self._get_param("SubnetId"),
+            "owner_id": owner_id,
+            "key_name": self._get_param("KeyName"),
+            "security_group_ids": self._get_multi_param("SecurityGroupId"),
+            "nics": dict_from_querystring("NetworkInterface", self.querystring),
+            "private_ip": self._get_param("PrivateIpAddress"),
+            "associate_public_ip": self._get_param("AssociatePublicIpAddress"),
+            "tags": self._parse_tag_specification("TagSpecification"),
+            "ebs_optimized": self._get_param("EbsOptimized") or False,
+            "instance_initiated_shutdown_behavior": self._get_param(
+                "InstanceInitiatedShutdownBehavior"
+            ),
+        }
+
+        mappings = self._parse_block_device_mapping()
+        if mappings:
+            kwargs["block_device_mappings"] = mappings
 
         if self.is_not_dryrun("RunInstance"):
             new_reservation = self.ec2_backend.add_instances(
-                image_id,
-                min_count,
-                user_data,
-                security_group_names,
-                instance_type=instance_type,
-                placement=placement,
-                region_name=region_name,
-                subnet_id=subnet_id,
-                owner_id=owner_id,
-                key_name=key_name,
-                security_group_ids=security_group_ids,
-                nics=nics,
-                private_ip=private_ip,
-                associate_public_ip=associate_public_ip,
-                tags=tags,
-                ebs_optimized=ebs_optimized,
-                instance_initiated_shutdown_behavior=instance_initiated_shutdown_behavior,
+                image_id, min_count, user_data, security_group_names, **kwargs
             )
 
             template = self.response_template(EC2_RUN_INSTANCES)
@@ -113,16 +110,34 @@ class InstanceResponse(BaseResponse):
             template = self.response_template(EC2_START_INSTANCES)
             return template.render(instances=instances)
 
+    def _get_list_of_dict_params(self, param_prefix, _dct):
+        """
+        Simplified version of _get_dict_param
+        Allows you to pass in a custom dict instead of using self.querystring by default
+        """
+        params = []
+        for key, value in _dct.items():
+            if key.startswith(param_prefix):
+                params.append(value)
+        return params
+
     def describe_instance_status(self):
         instance_ids = self._get_multi_param("InstanceId")
         include_all_instances = self._get_param("IncludeAllInstances") == "true"
+        filters = self._get_list_prefix("Filter")
+        filters = [
+            {"name": f["name"], "values": self._get_list_of_dict_params("value.", f)}
+            for f in filters
+        ]
 
         if instance_ids:
-            instances = self.ec2_backend.get_multi_instances_by_id(instance_ids)
+            instances = self.ec2_backend.get_multi_instances_by_id(
+                instance_ids, filters
+            )
         elif include_all_instances:
-            instances = self.ec2_backend.all_instances()
+            instances = self.ec2_backend.all_instances(filters)
         else:
-            instances = self.ec2_backend.all_running_instances()
+            instances = self.ec2_backend.all_running_instances(filters)
 
         template = self.response_template(EC2_INSTANCE_STATUS)
         return template.render(instances=instances)
@@ -149,6 +164,14 @@ class InstanceResponse(BaseResponse):
             template = self.response_template(EC2_DESCRIBE_INSTANCE_ATTRIBUTE)
 
         return template.render(instance=instance, attribute=attribute, value=value)
+
+    def describe_instance_credit_specifications(self):
+        instance_ids = self._get_multi_param("InstanceId")
+        instance = self.ec2_backend.describe_instance_credit_specifications(
+            instance_ids
+        )
+        template = self.response_template(EC2_DESCRIBE_INSTANCE_CREDIT_SPECIFICATIONS)
+        return template.render(instances=instance)
 
     def modify_instance_attribute(self):
         handlers = [
@@ -246,6 +269,58 @@ class InstanceResponse(BaseResponse):
             )
             return EC2_MODIFY_INSTANCE_ATTRIBUTE
 
+    def _parse_block_device_mapping(self):
+        device_mappings = self._get_list_prefix("BlockDeviceMapping")
+        mappings = []
+        for device_mapping in device_mappings:
+            self._validate_block_device_mapping(device_mapping)
+            device_template = deepcopy(BLOCK_DEVICE_MAPPING_TEMPLATE)
+            device_template["VirtualName"] = device_mapping.get("virtual_name")
+            device_template["DeviceName"] = device_mapping.get("device_name")
+            device_template["Ebs"]["SnapshotId"] = device_mapping.get(
+                "ebs._snapshot_id"
+            )
+            device_template["Ebs"]["VolumeSize"] = device_mapping.get(
+                "ebs._volume_size"
+            )
+            device_template["Ebs"]["DeleteOnTermination"] = device_mapping.get(
+                "ebs._delete_on_termination", False
+            )
+            device_template["Ebs"]["VolumeType"] = device_mapping.get(
+                "ebs._volume_type"
+            )
+            device_template["Ebs"]["Iops"] = device_mapping.get("ebs._iops")
+            device_template["Ebs"]["Encrypted"] = device_mapping.get(
+                "ebs._encrypted", False
+            )
+            mappings.append(device_template)
+
+        return mappings
+
+    @staticmethod
+    def _validate_block_device_mapping(device_mapping):
+
+        if not any(mapping for mapping in device_mapping if mapping.startswith("ebs.")):
+            raise MissingParameterError("ebs")
+        if (
+            "ebs._volume_size" not in device_mapping
+            and "ebs._snapshot_id" not in device_mapping
+        ):
+            raise MissingParameterError("size or snapshotId")
+
+
+BLOCK_DEVICE_MAPPING_TEMPLATE = {
+    "VirtualName": None,
+    "DeviceName": None,
+    "Ebs": {
+        "SnapshotId": None,
+        "VolumeSize": None,
+        "DeleteOnTermination": None,
+        "VolumeType": None,
+        "Iops": None,
+        "Encrypted": None,
+    },
+}
 
 EC2_RUN_INSTANCES = (
     """<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
@@ -652,6 +727,18 @@ EC2_DESCRIBE_INSTANCE_ATTRIBUTE = """<DescribeInstanceAttributeResponse xmlns="h
     {% endif %}
   </{{ attribute }}>
 </DescribeInstanceAttributeResponse>"""
+
+EC2_DESCRIBE_INSTANCE_CREDIT_SPECIFICATIONS = """<DescribeInstanceCreditSpecificationsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>1b234b5c-d6ef-7gh8-90i1-j2345678901</requestId>
+    <instanceCreditSpecificationSet>
+       {% for instance in instances %}
+      <item>
+        <instanceId>{{ instance.id }}</instanceId>
+        <cpuCredits>standard</cpuCredits>
+      </item>
+    {% endfor %}
+    </instanceCreditSpecificationSet>
+</DescribeInstanceCreditSpecificationsResponse>"""
 
 EC2_DESCRIBE_INSTANCE_GROUPSET_ATTRIBUTE = """<DescribeInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>

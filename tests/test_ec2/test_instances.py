@@ -9,6 +9,7 @@ from nose.tools import assert_raises
 import base64
 import datetime
 import ipaddress
+import json
 
 import six
 import boto
@@ -18,7 +19,7 @@ from boto.exception import EC2ResponseError, EC2ResponseError
 from freezegun import freeze_time
 import sure  # noqa
 
-from moto import mock_ec2_deprecated, mock_ec2
+from moto import mock_ec2_deprecated, mock_ec2, mock_cloudformation
 from tests.helpers import requires_boto_gte
 
 
@@ -71,7 +72,7 @@ def test_instance_launch_and_terminate():
     instance.id.should.equal(instance.id)
     instance.state.should.equal("running")
     instance.launch_time.should.equal("2014-01-01T05:00:00.000Z")
-    instance.vpc_id.should.equal(None)
+    instance.vpc_id.shouldnt.equal(None)
     instance.placement.should.equal("us-east-1a")
 
     root_device_name = instance.root_device_name
@@ -96,6 +97,106 @@ def test_instance_launch_and_terminate():
     reservations = conn.get_all_instances()
     instance = reservations[0].instances[0]
     instance.state.should.equal("terminated")
+
+
+@mock_ec2
+def test_instance_terminate_discard_volumes():
+
+    ec2_resource = boto3.resource("ec2", "us-west-1")
+
+    result = ec2_resource.create_instances(
+        ImageId="ami-d3adb33f",
+        MinCount=1,
+        MaxCount=1,
+        BlockDeviceMappings=[
+            {
+                "DeviceName": "/dev/sda1",
+                "Ebs": {"VolumeSize": 50, "DeleteOnTermination": True},
+            }
+        ],
+    )
+    instance = result[0]
+
+    instance_volume_ids = []
+    for volume in instance.volumes.all():
+        instance_volume_ids.append(volume.volume_id)
+
+    instance.terminate()
+    instance.wait_until_terminated()
+
+    assert not list(ec2_resource.volumes.all())
+
+
+@mock_ec2
+def test_instance_terminate_keep_volumes():
+    ec2_resource = boto3.resource("ec2", "us-west-1")
+
+    result = ec2_resource.create_instances(
+        ImageId="ami-d3adb33f",
+        MinCount=1,
+        MaxCount=1,
+        BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 50}}],
+    )
+    instance = result[0]
+
+    instance_volume_ids = []
+    for volume in instance.volumes.all():
+        instance_volume_ids.append(volume.volume_id)
+
+    instance.terminate()
+    instance.wait_until_terminated()
+
+    assert len(instance_volume_ids) == 1
+    volume = ec2_resource.Volume(instance_volume_ids[0])
+    volume.state.should.equal("available")
+
+
+@mock_ec2
+def test_instance_terminate_detach_volumes():
+    ec2_resource = boto3.resource("ec2", "us-west-1")
+    result = ec2_resource.create_instances(
+        ImageId="ami-d3adb33f",
+        MinCount=1,
+        MaxCount=1,
+        BlockDeviceMappings=[
+            {"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 50}},
+            {"DeviceName": "/dev/sda2", "Ebs": {"VolumeSize": 50}},
+        ],
+    )
+    instance = result[0]
+    for volume in instance.volumes.all():
+        response = instance.detach_volume(VolumeId=volume.volume_id)
+        response["State"].should.equal("detaching")
+
+    instance.terminate()
+    instance.wait_until_terminated()
+
+    assert len(list(ec2_resource.volumes.all())) == 2
+
+
+@mock_ec2
+def test_instance_detach_volume_wrong_path():
+    ec2_resource = boto3.resource("ec2", "us-west-1")
+    result = ec2_resource.create_instances(
+        ImageId="ami-d3adb33f",
+        MinCount=1,
+        MaxCount=1,
+        BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 50}},],
+    )
+    instance = result[0]
+    for volume in instance.volumes.all():
+        with assert_raises(ClientError) as ex:
+            instance.detach_volume(VolumeId=volume.volume_id, Device="/dev/sdf")
+
+        ex.exception.response["Error"]["Code"].should.equal(
+            "InvalidAttachment.NotFound"
+        )
+        ex.exception.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+        ex.exception.response["Error"]["Message"].should.equal(
+            "The volume {0} is not attached to instance {1} as device {2}".format(
+                volume.volume_id, instance.instance_id, "/dev/sdf"
+            )
+        )
 
 
 @mock_ec2_deprecated
@@ -1125,6 +1226,111 @@ def test_run_instance_with_keypair():
     instance.key_name.should.equal("keypair_name")
 
 
+@mock_ec2
+def test_run_instance_with_block_device_mappings():
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+
+    kwargs = {
+        "MinCount": 1,
+        "MaxCount": 1,
+        "ImageId": "ami-d3adb33f",
+        "KeyName": "the_key",
+        "InstanceType": "t1.micro",
+        "BlockDeviceMappings": [{"DeviceName": "/dev/sda2", "Ebs": {"VolumeSize": 50}}],
+    }
+
+    ec2_client.run_instances(**kwargs)
+
+    instances = ec2_client.describe_instances()
+    volume = instances["Reservations"][0]["Instances"][0]["BlockDeviceMappings"][0][
+        "Ebs"
+    ]
+
+    volumes = ec2_client.describe_volumes(VolumeIds=[volume["VolumeId"]])
+    volumes["Volumes"][0]["Size"].should.equal(50)
+
+
+@mock_ec2
+def test_run_instance_with_block_device_mappings_missing_ebs():
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+
+    kwargs = {
+        "MinCount": 1,
+        "MaxCount": 1,
+        "ImageId": "ami-d3adb33f",
+        "KeyName": "the_key",
+        "InstanceType": "t1.micro",
+        "BlockDeviceMappings": [{"DeviceName": "/dev/sda2"}],
+    }
+    with assert_raises(ClientError) as ex:
+        ec2_client.run_instances(**kwargs)
+
+    ex.exception.response["Error"]["Code"].should.equal("MissingParameter")
+    ex.exception.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    ex.exception.response["Error"]["Message"].should.equal(
+        "The request must contain the parameter ebs"
+    )
+
+
+@mock_ec2
+def test_run_instance_with_block_device_mappings_missing_size():
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+
+    kwargs = {
+        "MinCount": 1,
+        "MaxCount": 1,
+        "ImageId": "ami-d3adb33f",
+        "KeyName": "the_key",
+        "InstanceType": "t1.micro",
+        "BlockDeviceMappings": [
+            {"DeviceName": "/dev/sda2", "Ebs": {"VolumeType": "standard"}}
+        ],
+    }
+    with assert_raises(ClientError) as ex:
+        ec2_client.run_instances(**kwargs)
+
+    ex.exception.response["Error"]["Code"].should.equal("MissingParameter")
+    ex.exception.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    ex.exception.response["Error"]["Message"].should.equal(
+        "The request must contain the parameter size or snapshotId"
+    )
+
+
+@mock_ec2
+def test_run_instance_with_block_device_mappings_from_snapshot():
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+    ec2_resource = boto3.resource("ec2", region_name="us-east-1")
+    volume_details = {
+        "AvailabilityZone": "1a",
+        "Size": 30,
+    }
+
+    volume = ec2_resource.create_volume(**volume_details)
+    snapshot = volume.create_snapshot()
+    kwargs = {
+        "MinCount": 1,
+        "MaxCount": 1,
+        "ImageId": "ami-d3adb33f",
+        "KeyName": "the_key",
+        "InstanceType": "t1.micro",
+        "BlockDeviceMappings": [
+            {"DeviceName": "/dev/sda2", "Ebs": {"SnapshotId": snapshot.snapshot_id}}
+        ],
+    }
+
+    ec2_client.run_instances(**kwargs)
+
+    instances = ec2_client.describe_instances()
+    volume = instances["Reservations"][0]["Instances"][0]["BlockDeviceMappings"][0][
+        "Ebs"
+    ]
+
+    volumes = ec2_client.describe_volumes(VolumeIds=[volume["VolumeId"]])
+
+    volumes["Volumes"][0]["Size"].should.equal(30)
+    volumes["Volumes"][0]["SnapshotId"].should.equal(snapshot.snapshot_id)
+
+
 @mock_ec2_deprecated
 def test_describe_instance_status_no_instances():
     conn = boto.connect_ec2("the_key", "the_secret")
@@ -1144,7 +1350,7 @@ def test_describe_instance_status_with_instances():
 
 
 @mock_ec2_deprecated
-def test_describe_instance_status_with_instance_filter():
+def test_describe_instance_status_with_instance_filter_deprecated():
     conn = boto.connect_ec2("the_key", "the_secret")
 
     # We want to filter based on this one
@@ -1164,6 +1370,90 @@ def test_describe_instance_status_with_instance_filter():
     cm.exception.code.should.equal("InvalidInstanceID.NotFound")
     cm.exception.status.should.equal(400)
     cm.exception.request_id.should_not.be.none
+
+
+@mock_ec2
+def test_describe_instance_credit_specifications():
+    conn = boto3.client("ec2", region_name="us-west-1")
+
+    # We want to filter based on this one
+    reservation = conn.run_instances(ImageId="ami-1234abcd", MinCount=1, MaxCount=1)
+    result = conn.describe_instance_credit_specifications(
+        InstanceIds=[reservation["Instances"][0]["InstanceId"]]
+    )
+    assert (
+        result["InstanceCreditSpecifications"][0]["InstanceId"]
+        == reservation["Instances"][0]["InstanceId"]
+    )
+
+
+@mock_ec2
+def test_describe_instance_status_with_instance_filter():
+    conn = boto3.client("ec2", region_name="us-west-1")
+
+    # We want to filter based on this one
+    reservation = conn.run_instances(ImageId="ami-1234abcd", MinCount=3, MaxCount=3)
+    instance1 = reservation["Instances"][0]
+    instance2 = reservation["Instances"][1]
+    instance3 = reservation["Instances"][2]
+    conn.stop_instances(InstanceIds=[instance1["InstanceId"]])
+    stopped_instance_ids = [instance1["InstanceId"]]
+    running_instance_ids = sorted([instance2["InstanceId"], instance3["InstanceId"]])
+    all_instance_ids = sorted(stopped_instance_ids + running_instance_ids)
+
+    # Filter instance using the state name
+    state_name_filter = {
+        "running_and_stopped": [
+            {"Name": "instance-state-name", "Values": ["running", "stopped"]}
+        ],
+        "running": [{"Name": "instance-state-name", "Values": ["running"]}],
+        "stopped": [{"Name": "instance-state-name", "Values": ["stopped"]}],
+    }
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_name_filter["running_and_stopped"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(all_instance_ids)
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_name_filter["running"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(running_instance_ids)
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_name_filter["stopped"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(stopped_instance_ids)
+
+    # Filter instance using the state code
+    state_code_filter = {
+        "running_and_stopped": [
+            {"Name": "instance-state-code", "Values": ["16", "80"]}
+        ],
+        "running": [{"Name": "instance-state-code", "Values": ["16"]}],
+        "stopped": [{"Name": "instance-state-code", "Values": ["80"]}],
+    }
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_code_filter["running_and_stopped"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(all_instance_ids)
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_code_filter["running"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(running_instance_ids)
+
+    found_statuses = conn.describe_instance_status(
+        IncludeAllInstances=True, Filters=state_code_filter["stopped"]
+    )["InstanceStatuses"]
+    found_instance_ids = [status["InstanceId"] for status in found_statuses]
+    sorted(found_instance_ids).should.equal(stopped_instance_ids)
 
 
 @requires_boto_gte("2.32.0")
@@ -1226,14 +1516,14 @@ def test_modify_delete_on_termination():
     result = ec2_client.create_instances(ImageId="ami-12345678", MinCount=1, MaxCount=1)
     instance = result[0]
     instance.load()
-    instance.block_device_mappings[0]["Ebs"]["DeleteOnTermination"].should.be(False)
+    instance.block_device_mappings[0]["Ebs"]["DeleteOnTermination"].should.be(True)
     instance.modify_attribute(
         BlockDeviceMappings=[
-            {"DeviceName": "/dev/sda1", "Ebs": {"DeleteOnTermination": True}}
+            {"DeviceName": "/dev/sda1", "Ebs": {"DeleteOnTermination": False}}
         ]
     )
     instance.load()
-    instance.block_device_mappings[0]["Ebs"]["DeleteOnTermination"].should.be(True)
+    instance.block_device_mappings[0]["Ebs"]["DeleteOnTermination"].should.be(False)
 
 
 @mock_ec2
@@ -1247,6 +1537,12 @@ def test_create_instance_ebs_optimized():
     instance.ebs_optimized.should.be(True)
 
     instance.modify_attribute(EbsOptimized={"Value": False})
+    instance.load()
+    instance.ebs_optimized.should.be(False)
+
+    instance = ec2_resource.create_instances(
+        ImageId="ami-12345678", MaxCount=1, MinCount=1,
+    )[0]
     instance.load()
     instance.ebs_optimized.should.be(False)
 
@@ -1330,3 +1626,40 @@ def test_describe_instance_attribute():
             invalid_instance_attribute=invalid_instance_attribute
         )
         ex.exception.response["Error"]["Message"].should.equal(message)
+
+
+@mock_ec2
+@mock_cloudformation
+def test_volume_size_through_cloudformation():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    cf = boto3.client("cloudformation", region_name="us-east-1")
+
+    volume_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "testInstance": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "ImageId": "ami-d3adb33f",
+                    "KeyName": "dummy",
+                    "InstanceType": "t2.micro",
+                    "BlockDeviceMappings": [
+                        {"DeviceName": "/dev/sda2", "Ebs": {"VolumeSize": "50"}}
+                    ],
+                    "Tags": [
+                        {"Key": "foo", "Value": "bar"},
+                        {"Key": "blah", "Value": "baz"},
+                    ],
+                },
+            }
+        },
+    }
+    template_json = json.dumps(volume_template)
+    cf.create_stack(StackName="test_stack", TemplateBody=template_json)
+    instances = ec2.describe_instances()
+    volume = instances["Reservations"][0]["Instances"][0]["BlockDeviceMappings"][0][
+        "Ebs"
+    ]
+
+    volumes = ec2.describe_volumes(VolumeIds=[volume["VolumeId"]])
+    volumes["Volumes"][0]["Size"].should.equal(50)

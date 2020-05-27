@@ -1,5 +1,6 @@
 from __future__ import unicode_literals
 import functools
+import json
 import logging
 import copy
 import warnings
@@ -17,6 +18,7 @@ from moto.ec2 import models as ec2_models
 from moto.ecs import models as ecs_models
 from moto.elb import models as elb_models
 from moto.elbv2 import models as elbv2_models
+from moto.events import models as events_models
 from moto.iam import models as iam_models
 from moto.kinesis import models as kinesis_models
 from moto.kms import models as kms_models
@@ -24,7 +26,8 @@ from moto.rds import models as rds_models
 from moto.rds2 import models as rds2_models
 from moto.redshift import models as redshift_models
 from moto.route53 import models as route53_models
-from moto.s3 import models as s3_models
+from moto.s3 import models as s3_models, s3_backend
+from moto.s3.utils import bucket_and_name_from_url
 from moto.sns import models as sns_models
 from moto.sqs import models as sqs_models
 from moto.core import ACCOUNT_ID
@@ -92,22 +95,49 @@ MODEL_MAP = {
     "AWS::SNS::Topic": sns_models.Topic,
     "AWS::S3::Bucket": s3_models.FakeBucket,
     "AWS::SQS::Queue": sqs_models.Queue,
+    "AWS::Events::Rule": events_models.Rule,
+}
+
+UNDOCUMENTED_NAME_TYPE_MAP = {
+    "AWS::AutoScaling::AutoScalingGroup": "AutoScalingGroupName",
+    "AWS::AutoScaling::LaunchConfiguration": "LaunchConfigurationName",
+    "AWS::IAM::InstanceProfile": "InstanceProfileName",
 }
 
 # http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-name.html
 NAME_TYPE_MAP = {
-    "AWS::CloudWatch::Alarm": "Alarm",
+    "AWS::ApiGateway::ApiKey": "Name",
+    "AWS::ApiGateway::Model": "Name",
+    "AWS::CloudWatch::Alarm": "AlarmName",
     "AWS::DynamoDB::Table": "TableName",
-    "AWS::ElastiCache::CacheCluster": "ClusterName",
     "AWS::ElasticBeanstalk::Application": "ApplicationName",
     "AWS::ElasticBeanstalk::Environment": "EnvironmentName",
+    "AWS::CodeDeploy::Application": "ApplicationName",
+    "AWS::CodeDeploy::DeploymentConfig": "DeploymentConfigName",
+    "AWS::CodeDeploy::DeploymentGroup": "DeploymentGroupName",
+    "AWS::Config::ConfigRule": "ConfigRuleName",
+    "AWS::Config::DeliveryChannel": "Name",
+    "AWS::Config::ConfigurationRecorder": "Name",
     "AWS::ElasticLoadBalancing::LoadBalancer": "LoadBalancerName",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer": "Name",
     "AWS::ElasticLoadBalancingV2::TargetGroup": "Name",
+    "AWS::EC2::SecurityGroup": "GroupName",
+    "AWS::ElastiCache::CacheCluster": "ClusterName",
+    "AWS::ECR::Repository": "RepositoryName",
+    "AWS::ECS::Cluster": "ClusterName",
+    "AWS::Elasticsearch::Domain": "DomainName",
+    "AWS::Events::Rule": "Name",
+    "AWS::IAM::Group": "GroupName",
+    "AWS::IAM::ManagedPolicy": "ManagedPolicyName",
+    "AWS::IAM::Role": "RoleName",
+    "AWS::IAM::User": "UserName",
+    "AWS::Lambda::Function": "FunctionName",
     "AWS::RDS::DBInstance": "DBInstanceIdentifier",
     "AWS::S3::Bucket": "BucketName",
     "AWS::SNS::Topic": "TopicName",
     "AWS::SQS::Queue": "QueueName",
 }
+NAME_TYPE_MAP.update(UNDOCUMENTED_NAME_TYPE_MAP)
 
 # Just ignore these models types for now
 NULL_MODELS = [
@@ -150,7 +180,10 @@ def clean_json(resource_json, resources_map):
             map_path = resource_json["Fn::FindInMap"][1:]
             result = resources_map[map_name]
             for path in map_path:
-                result = result[clean_json(path, resources_map)]
+                if "Fn::Transform" in result:
+                    result = resources_map[clean_json(path, resources_map)]
+                else:
+                    result = result[clean_json(path, resources_map)]
             return result
 
         if "Fn::GetAtt" in resource_json:
@@ -196,13 +229,13 @@ def clean_json(resource_json, resources_map):
                 )
             else:
                 fn_sub_value = clean_json(resource_json["Fn::Sub"], resources_map)
-                to_sub = re.findall('(?=\${)[^!^"]*?}', fn_sub_value)
-                literals = re.findall('(?=\${!)[^"]*?}', fn_sub_value)
+                to_sub = re.findall(r'(?=\${)[^!^"]*?}', fn_sub_value)
+                literals = re.findall(r'(?=\${!)[^"]*?}', fn_sub_value)
                 for sub in to_sub:
                     if "." in sub:
                         cleaned_ref = clean_json(
                             {
-                                "Fn::GetAtt": re.findall('(?<=\${)[^"]*?(?=})', sub)[
+                                "Fn::GetAtt": re.findall(r'(?<=\${)[^"]*?(?=})', sub)[
                                     0
                                 ].split(".")
                             },
@@ -210,7 +243,7 @@ def clean_json(resource_json, resources_map):
                         )
                     else:
                         cleaned_ref = clean_json(
-                            {"Ref": re.findall('(?<=\${)[^"]*?(?=})', sub)[0]},
+                            {"Ref": re.findall(r'(?<=\${)[^"]*?(?=})', sub)[0]},
                             resources_map,
                         )
                     fn_sub_value = fn_sub_value.replace(sub, cleaned_ref)
@@ -448,6 +481,7 @@ class ResourceMap(collections_abc.Mapping):
             return self._parsed_resources[resource_logical_id]
         else:
             resource_json = self._resource_json_map.get(resource_logical_id)
+
             if not resource_json:
                 raise KeyError(resource_logical_id)
             new_resource = parse_and_create_resource(
@@ -463,12 +497,51 @@ class ResourceMap(collections_abc.Mapping):
     def __len__(self):
         return len(self._resource_json_map)
 
+    def __get_resources_in_dependency_order(self):
+        resource_map = copy.deepcopy(self._resource_json_map)
+        resources_in_dependency_order = []
+
+        def recursively_get_dependencies(resource):
+            resource_info = resource_map[resource]
+
+            if "DependsOn" not in resource_info:
+                resources_in_dependency_order.append(resource)
+                del resource_map[resource]
+                return
+
+            dependencies = resource_info["DependsOn"]
+            if isinstance(dependencies, str):  # Dependencies may be a string or list
+                dependencies = [dependencies]
+
+            for dependency in dependencies:
+                if dependency in resource_map:
+                    recursively_get_dependencies(dependency)
+
+            resources_in_dependency_order.append(resource)
+            del resource_map[resource]
+
+        while resource_map:
+            recursively_get_dependencies(list(resource_map.keys())[0])
+
+        return resources_in_dependency_order
+
     @property
     def resources(self):
         return self._resource_json_map.keys()
 
     def load_mapping(self):
         self._parsed_resources.update(self._template.get("Mappings", {}))
+
+    def transform_mapping(self):
+        for k, v in self._template.get("Mappings", {}).items():
+            if "Fn::Transform" in v:
+                name = v["Fn::Transform"]["Name"]
+                params = v["Fn::Transform"]["Parameters"]
+                if name == "AWS::Include":
+                    location = params["Location"]
+                    bucket_name, name = bucket_and_name_from_url(location)
+                    key = s3_backend.get_key(bucket_name, name)
+                    self._parsed_resources.update(json.loads(key.value))
 
     def load_parameters(self):
         parameter_slots = self._template.get("Parameters", {})
@@ -513,20 +586,23 @@ class ResourceMap(collections_abc.Mapping):
         for condition_name in self.lazy_condition_map:
             self.lazy_condition_map[condition_name]
 
-    def create(self):
+    def load(self):
         self.load_mapping()
+        self.transform_mapping()
         self.load_parameters()
         self.load_conditions()
 
+    def create(self):
         # Since this is a lazy map, to create every object we just need to
         # iterate through self.
+        # Assumes that self.load() has been called before
         self.tags.update(
             {
                 "aws:cloudformation:stack-name": self.get("AWS::StackName"),
                 "aws:cloudformation:stack-id": self.get("AWS::StackId"),
             }
         )
-        for resource in self.resources:
+        for resource in self.__get_resources_in_dependency_order():
             if isinstance(self[resource], ec2_models.TaggedEC2Resource):
                 self.tags["aws:cloudformation:logical-id"] = resource
                 ec2_models.ec2_backends[self._region_name].create_tags(

@@ -11,8 +11,10 @@ from six.moves.urllib.error import HTTPError
 from functools import wraps
 from gzip import GzipFile
 from io import BytesIO
+import mimetypes
 import zlib
 import pickle
+import uuid
 
 import json
 import boto
@@ -38,6 +40,7 @@ from moto import settings, mock_s3, mock_s3_deprecated, mock_config
 import moto.s3.models as s3model
 from moto.core.exceptions import InvalidNextTokenException
 from moto.core.utils import py2_strip_unicode_keys
+
 
 if settings.TEST_SERVER_MODE:
     REDUCED_PART_SIZE = s3model.UPLOAD_PART_MIN_SIZE
@@ -1018,12 +1021,23 @@ def test_s3_object_in_public_bucket():
         s3_anonymous.Object(key="file.txt", bucket_name="test-bucket").get()
     exc.exception.response["Error"]["Code"].should.equal("403")
 
+
+@mock_s3
+def test_s3_object_in_public_bucket_using_multiple_presigned_urls():
+    s3 = boto3.resource("s3")
+    bucket = s3.Bucket("test-bucket")
+    bucket.create(
+        ACL="public-read", CreateBucketConfiguration={"LocationConstraint": "us-west-1"}
+    )
+    bucket.put_object(Body=b"ABCD", Key="file.txt")
+
     params = {"Bucket": "test-bucket", "Key": "file.txt"}
     presigned_url = boto3.client("s3").generate_presigned_url(
         "get_object", params, ExpiresIn=900
     )
-    response = requests.get(presigned_url)
-    assert response.status_code == 200
+    for i in range(1, 10):
+        response = requests.get(presigned_url)
+        assert response.status_code == 200, "Failed on req number {}".format(i)
 
 
 @mock_s3
@@ -2013,6 +2027,22 @@ def test_boto3_get_object():
 
 
 @mock_s3
+def test_boto3_s3_content_type():
+    s3 = boto3.resource("s3", region_name=DEFAULT_REGION_NAME)
+    my_bucket = s3.Bucket("my-cool-bucket")
+    my_bucket.create()
+    s3_path = "test_s3.py"
+    s3 = boto3.resource("s3", verify=False)
+
+    content_type = "text/python-x"
+    s3.Object(my_bucket.name, s3_path).put(
+        ContentType=content_type, Body=b"some python code", ACL="public-read"
+    )
+
+    s3.Object(my_bucket.name, s3_path).content_type.should.equal(content_type)
+
+
+@mock_s3
 def test_boto3_get_missing_object_with_part_number():
     s3 = boto3.resource("s3", region_name=DEFAULT_REGION_NAME)
     s3.create_bucket(Bucket="blah")
@@ -2120,6 +2150,19 @@ def test_boto3_copy_object_with_versioning():
 
 
 @mock_s3
+def test_s3_abort_multipart_data_with_invalid_upload_and_key():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+
+    client.create_bucket(Bucket="blah")
+
+    with assert_raises(Exception) as err:
+        client.abort_multipart_upload(
+            Bucket="blah", Key="foobar", UploadId="dummy_upload_id"
+        )
+    err.exception.response["Error"]["Code"].should.equal("NoSuchUpload")
+
+
+@mock_s3
 def test_boto3_copy_object_from_unversioned_to_versioned_bucket():
     client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
 
@@ -2183,6 +2226,29 @@ def test_boto3_deleted_versionings_list():
     client.put_object(Bucket="blah", Key="test1", Body=b"test1")
     client.put_object(Bucket="blah", Key="test2", Body=b"test2")
     client.delete_objects(Bucket="blah", Delete={"Objects": [{"Key": "test1"}]})
+
+    listed = client.list_objects_v2(Bucket="blah")
+    assert len(listed["Contents"]) == 1
+
+
+@mock_s3
+def test_boto3_delete_objects_for_specific_version_id():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    client.create_bucket(Bucket="blah")
+    client.put_bucket_versioning(
+        Bucket="blah", VersioningConfiguration={"Status": "Enabled"}
+    )
+
+    client.put_object(Bucket="blah", Key="test1", Body=b"test1a")
+    client.put_object(Bucket="blah", Key="test1", Body=b"test1b")
+
+    response = client.list_object_versions(Bucket="blah", Prefix="test1")
+    id_to_delete = [v["VersionId"] for v in response["Versions"] if v["IsLatest"]][0]
+
+    response = client.delete_objects(
+        Bucket="blah", Delete={"Objects": [{"Key": "test1", "VersionId": id_to_delete}]}
+    )
+    assert response["Deleted"] == [{"Key": "test1", "VersionId": id_to_delete}]
 
     listed = client.list_objects_v2(Bucket="blah")
     assert len(listed["Contents"]) == 1
@@ -2382,6 +2448,24 @@ def test_boto3_put_bucket_tagging():
     e.response["Error"]["Code"].should.equal("InvalidTag")
     e.response["Error"]["Message"].should.equal(
         "Cannot provide multiple Tags with the same key"
+    )
+
+    # Cannot put tags that are "system" tags - i.e. tags that start with "aws:"
+    with assert_raises(ClientError) as ce:
+        s3.put_bucket_tagging(
+            Bucket=bucket_name,
+            Tagging={"TagSet": [{"Key": "aws:sometag", "Value": "nope"}]},
+        )
+    e = ce.exception
+    e.response["Error"]["Code"].should.equal("InvalidTag")
+    e.response["Error"]["Message"].should.equal(
+        "System tags cannot be added/updated by requester"
+    )
+
+    # This is OK though:
+    s3.put_bucket_tagging(
+        Bucket=bucket_name,
+        Tagging={"TagSet": [{"Key": "something:aws:stuff", "Value": "this is fine"}]},
     )
 
 
@@ -3208,7 +3292,8 @@ def test_boto3_put_object_tagging_on_earliest_version():
     # Older version has tags while the most recent does not
     resp = s3.get_object_tagging(Bucket=bucket_name, Key=key, VersionId=first_object.id)
     resp["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    resp["TagSet"].should.equal(
+    sorted_tagset = sorted(resp["TagSet"], key=lambda t: t["Key"])
+    sorted_tagset.should.equal(
         [{"Key": "item1", "Value": "foo"}, {"Key": "item2", "Value": "bar"}]
     )
 
@@ -3286,7 +3371,8 @@ def test_boto3_put_object_tagging_on_both_version():
 
     resp = s3.get_object_tagging(Bucket=bucket_name, Key=key, VersionId=first_object.id)
     resp["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    resp["TagSet"].should.equal(
+    sorted_tagset = sorted(resp["TagSet"], key=lambda t: t["Key"])
+    sorted_tagset.should.equal(
         [{"Key": "item1", "Value": "foo"}, {"Key": "item2", "Value": "bar"}]
     )
 
@@ -3294,7 +3380,8 @@ def test_boto3_put_object_tagging_on_both_version():
         Bucket=bucket_name, Key=key, VersionId=second_object.id
     )
     resp["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    resp["TagSet"].should.equal(
+    sorted_tagset = sorted(resp["TagSet"], key=lambda t: t["Key"])
+    sorted_tagset.should.equal(
         [{"Key": "item1", "Value": "baz"}, {"Key": "item2", "Value": "bin"}]
     )
 
@@ -3691,9 +3778,31 @@ def test_paths_with_leading_slashes_work():
 
 @mock_s3
 def test_root_dir_with_empty_name_works():
-    if os.environ.get("TEST_SERVER_MODE", "false").lower() == "true":
+    if settings.TEST_SERVER_MODE:
         raise SkipTest("Does not work in server mode due to error in Workzeug")
     store_and_read_back_a_key("/")
+
+
+@parameterized(["mybucket", "my.bucket"])
+@mock_s3
+def test_leading_slashes_not_removed(bucket_name):
+    """Make sure that leading slashes are not removed internally."""
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    s3.create_bucket(Bucket=bucket_name)
+
+    uploaded_key = "/key"
+    invalid_key_1 = "key"
+    invalid_key_2 = "//key"
+
+    s3.put_object(Bucket=bucket_name, Key=uploaded_key, Body=b"Some body")
+
+    with assert_raises(ClientError) as e:
+        s3.get_object(Bucket=bucket_name, Key=invalid_key_1)
+    e.exception.response["Error"]["Code"].should.equal("NoSuchKey")
+
+    with assert_raises(ClientError) as e:
+        s3.get_object(Bucket=bucket_name, Key=invalid_key_2)
+    e.exception.response["Error"]["Code"].should.equal("NoSuchKey")
 
 
 @parameterized(
@@ -4245,24 +4354,17 @@ def test_s3_config_dict():
         FakeAcl,
         FakeGrant,
         FakeGrantee,
-        FakeTag,
-        FakeTagging,
-        FakeTagSet,
         OWNER,
     )
 
     # Without any buckets:
     assert not s3_config_query.get_config_resource("some_bucket")
 
-    tags = FakeTagging(
-        FakeTagSet(
-            [FakeTag("someTag", "someValue"), FakeTag("someOtherTag", "someOtherValue")]
-        )
-    )
+    tags = {"someTag": "someValue", "someOtherTag": "someOtherValue"}
 
     # With 1 bucket in us-west-2:
     s3_config_query.backends["global"].create_bucket("bucket1", "us-west-2")
-    s3_config_query.backends["global"].put_bucket_tagging("bucket1", tags)
+    s3_config_query.backends["global"].put_bucket_tags("bucket1", tags)
 
     # With a log bucket:
     s3_config_query.backends["global"].create_bucket("logbucket", "us-west-2")
@@ -4380,4 +4482,42 @@ def test_s3_config_dict():
     assert not logging_bucket["tags"]
     assert not logging_bucket["supplementaryConfiguration"].get(
         "BucketTaggingConfiguration"
+    )
+
+
+@mock_s3
+def test_creating_presigned_post():
+    bucket = "presigned-test"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket=bucket)
+    success_url = "http://localhost/completed"
+    fdata = b"test data\n"
+    file_uid = uuid.uuid4()
+    conditions = [
+        {"Content-Type": "text/plain"},
+        {"x-amz-server-side-encryption": "AES256"},
+        {"success_action_redirect": success_url},
+    ]
+    conditions.append(["content-length-range", 1, 30])
+    data = s3.generate_presigned_post(
+        Bucket=bucket,
+        Key="{file_uid}.txt".format(file_uid=file_uid),
+        Fields={
+            "content-type": "text/plain",
+            "success_action_redirect": success_url,
+            "x-amz-server-side-encryption": "AES256",
+        },
+        Conditions=conditions,
+        ExpiresIn=1000,
+    )
+    resp = requests.post(
+        data["url"], data=data["fields"], files={"file": fdata}, allow_redirects=False
+    )
+    assert resp.headers["Location"] == success_url
+    assert resp.status_code == 303
+    assert (
+        s3.get_object(Bucket=bucket, Key="{file_uid}.txt".format(file_uid=file_uid))[
+            "Body"
+        ].read()
+        == fdata
     )

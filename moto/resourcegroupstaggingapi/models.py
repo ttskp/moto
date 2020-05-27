@@ -145,10 +145,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
         # Do S3, resource type s3
         if not resource_type_filters or "s3" in resource_type_filters:
             for bucket in self.s3_backend.buckets.values():
-                tags = []
-                for tag in bucket.tags.tag_set.tags:
-                    tags.append({"Key": tag.key, "Value": tag.value})
-
+                tags = self.s3_backend.tagger.list_tags_for_resource(bucket.arn)["Tags"]
                 if not tags or not tag_filter(
                     tags
                 ):  # Skip if no tags, or invalid filter
@@ -289,8 +286,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                 }
 
         # TODO add these to the keys and values functions / combine functions
-        # ELB
-
+        # ELB, resource type elasticloadbalancing:loadbalancer
         def get_elbv2_tags(arn):
             result = []
             for key, value in self.elbv2_backend.load_balancers[elb.arn].tags.items():
@@ -299,8 +295,8 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
 
         if (
             not resource_type_filters
-            or "elasticloadbalancer" in resource_type_filters
-            or "elasticloadbalancer:loadbalancer" in resource_type_filters
+            or "elasticloadbalancing" in resource_type_filters
+            or "elasticloadbalancing:loadbalancer" in resource_type_filters
         ):
             for elb in self.elbv2_backend.load_balancers.values():
                 tags = get_elbv2_tags(elb.arn)
@@ -308,6 +304,27 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                     continue
 
                 yield {"ResourceARN": "{0}".format(elb.arn), "Tags": tags}
+
+        # ELB Target Group, resource type elasticloadbalancing:targetgroup
+        def get_target_group_tags(arn):
+            result = []
+            for key, value in self.elbv2_backend.target_groups[
+                target_group.arn
+            ].tags.items():
+                result.append({"Key": key, "Value": value})
+            return result
+
+        if (
+            not resource_type_filters
+            or "elasticloadbalancing" in resource_type_filters
+            or "elasticloadbalancing:targetgroup" in resource_type_filters
+        ):
+            for target_group in self.elbv2_backend.target_groups.values():
+                tags = get_target_group_tags(target_group.arn)
+                if not tag_filter(tags):  # Skip if no tags, or invalid filter
+                    continue
+
+                yield {"ResourceARN": "{0}".format(target_group.arn), "Tags": tags}
 
         # EMR Cluster
 
@@ -362,8 +379,9 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
 
         # Do S3, resource type s3
         for bucket in self.s3_backend.buckets.values():
-            for tag in bucket.tags.tag_set.tags:
-                yield tag.key
+            tags = self.s3_backend.tagger.get_tag_dict_for_resource(bucket.arn)
+            for key, _ in tags.items():
+                yield key
 
         # EC2 tags
         def get_ec2_keys(res_id):
@@ -414,9 +432,10 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
 
         # Do S3, resource type s3
         for bucket in self.s3_backend.buckets.values():
-            for tag in bucket.tags.tag_set.tags:
-                if tag.key == tag_key:
-                    yield tag.value
+            tags = self.s3_backend.tagger.get_tag_dict_for_resource(bucket.arn)
+            for key, value in tags.items():
+                if key == tag_key:
+                    yield value
 
         # EC2 tags
         def get_ec2_values(res_id):

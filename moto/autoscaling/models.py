@@ -267,6 +267,9 @@ class FakeAutoScalingGroup(BaseModel):
         self.tags = tags if tags else []
         self.set_desired_capacity(desired_capacity)
 
+    def active_instances(self):
+        return [x for x in self.instance_states if x.lifecycle_state == "InService"]
+
     def _set_azs_and_vpcs(self, availability_zones, vpc_zone_identifier, update=False):
         # for updates, if only AZs are provided, they must not clash with
         # the AZs of existing VPCs
@@ -298,6 +301,14 @@ class FakeAutoScalingGroup(BaseModel):
         self.availability_zones = availability_zones
         self.vpc_zone_identifier = vpc_zone_identifier
 
+    @staticmethod
+    def __set_string_propagate_at_launch_booleans_on_tags(tags):
+        bool_to_string = {True: "true", False: "false"}
+        for tag in tags:
+            if "PropagateAtLaunch" in tag:
+                tag["PropagateAtLaunch"] = bool_to_string[tag["PropagateAtLaunch"]]
+        return tags
+
     @classmethod
     def create_from_cloudformation_json(
         cls, resource_name, cloudformation_json, region_name
@@ -326,7 +337,9 @@ class FakeAutoScalingGroup(BaseModel):
             target_group_arns=target_group_arns,
             placement_group=None,
             termination_policies=properties.get("TerminationPolicies", []),
-            tags=properties.get("Tags", []),
+            tags=cls.__set_string_propagate_at_launch_booleans_on_tags(
+                properties.get("Tags", [])
+            ),
             new_instances_protected_from_scale_in=properties.get(
                 "NewInstancesProtectedFromScaleIn", False
             ),
@@ -413,12 +426,11 @@ class FakeAutoScalingGroup(BaseModel):
         else:
             self.desired_capacity = new_capacity
 
-        curr_instance_count = len(self.instance_states)
+        curr_instance_count = len(self.active_instances())
 
         if self.desired_capacity == curr_instance_count:
-            return
-
-        if self.desired_capacity > curr_instance_count:
+            pass  # Nothing to do here
+        elif self.desired_capacity > curr_instance_count:
             # Need more instances
             count_needed = int(self.desired_capacity) - int(curr_instance_count)
 
@@ -442,6 +454,9 @@ class FakeAutoScalingGroup(BaseModel):
                 self.instance_states = list(
                     set(self.instance_states) - set(instances_to_remove)
                 )
+        if self.name in self.autoscaling_backend.autoscaling_groups:
+            self.autoscaling_backend.update_attached_elbs(self.name)
+            self.autoscaling_backend.update_attached_target_groups(self.name)
 
     def get_propagated_tags(self):
         propagated_tags = {}
@@ -450,7 +465,7 @@ class FakeAutoScalingGroup(BaseModel):
             # boto3 and cloudformation use PropagateAtLaunch
             if "propagate_at_launch" in tag and tag["propagate_at_launch"] == "true":
                 propagated_tags[tag["key"]] = tag["value"]
-            if "PropagateAtLaunch" in tag and tag["PropagateAtLaunch"]:
+            if "PropagateAtLaunch" in tag and tag["PropagateAtLaunch"] == "true":
                 propagated_tags[tag["Key"]] = tag["Value"]
         return propagated_tags
 
@@ -655,10 +670,16 @@ class AutoScalingBackend(BaseBackend):
         self.set_desired_capacity(group_name, 0)
         self.autoscaling_groups.pop(group_name, None)
 
-    def describe_auto_scaling_instances(self):
+    def describe_auto_scaling_instances(self, instance_ids):
         instance_states = []
         for group in self.autoscaling_groups.values():
-            instance_states.extend(group.instance_states)
+            instance_states.extend(
+                [
+                    x
+                    for x in group.instance_states
+                    if not instance_ids or x.instance.id in instance_ids
+                ]
+            )
         return instance_states
 
     def attach_instances(self, group_name, instance_ids):
@@ -682,6 +703,7 @@ class AutoScalingBackend(BaseBackend):
                 )
             group.instance_states.extend(new_instances)
             self.update_attached_elbs(group.name)
+            self.update_attached_target_groups(group.name)
 
     def set_instance_health(
         self, instance_id, health_status, should_respect_grace_period
@@ -697,7 +719,7 @@ class AutoScalingBackend(BaseBackend):
 
     def detach_instances(self, group_name, instance_ids, should_decrement):
         group = self.autoscaling_groups[group_name]
-        original_size = len(group.instance_states)
+        original_size = group.desired_capacity
 
         detached_instances = [
             x for x in group.instance_states if x.instance.id in instance_ids
@@ -714,13 +736,8 @@ class AutoScalingBackend(BaseBackend):
 
         if should_decrement:
             group.desired_capacity = original_size - len(instance_ids)
-        else:
-            count_needed = len(instance_ids)
-            group.replace_autoscaling_group_instances(
-                count_needed, group.get_propagated_tags()
-            )
 
-        self.update_attached_elbs(group_name)
+        group.set_desired_capacity(group.desired_capacity)
         return detached_instances
 
     def set_desired_capacity(self, group_name, desired_capacity):
@@ -785,7 +802,9 @@ class AutoScalingBackend(BaseBackend):
 
     def update_attached_elbs(self, group_name):
         group = self.autoscaling_groups[group_name]
-        group_instance_ids = set(state.instance.id for state in group.instance_states)
+        group_instance_ids = set(
+            state.instance.id for state in group.active_instances()
+        )
 
         # skip this if group.load_balancers is empty
         # otherwise elb_backend.describe_load_balancers returns all available load balancers
@@ -902,21 +921,60 @@ class AutoScalingBackend(BaseBackend):
             autoscaling_group_name,
             autoscaling_group,
         ) in self.autoscaling_groups.items():
-            original_instance_count = len(autoscaling_group.instance_states)
+            original_active_instance_count = len(autoscaling_group.active_instances())
             autoscaling_group.instance_states = list(
                 filter(
                     lambda i_state: i_state.instance.id not in instance_ids,
                     autoscaling_group.instance_states,
                 )
             )
-            difference = original_instance_count - len(
-                autoscaling_group.instance_states
+            difference = original_active_instance_count - len(
+                autoscaling_group.active_instances()
             )
             if difference > 0:
                 autoscaling_group.replace_autoscaling_group_instances(
                     difference, autoscaling_group.get_propagated_tags()
                 )
                 self.update_attached_elbs(autoscaling_group_name)
+
+    def enter_standby_instances(self, group_name, instance_ids, should_decrement):
+        group = self.autoscaling_groups[group_name]
+        original_size = group.desired_capacity
+        standby_instances = []
+        for instance_state in group.instance_states:
+            if instance_state.instance.id in instance_ids:
+                instance_state.lifecycle_state = "Standby"
+                standby_instances.append(instance_state)
+        if should_decrement:
+            group.desired_capacity = group.desired_capacity - len(instance_ids)
+        group.set_desired_capacity(group.desired_capacity)
+        return standby_instances, original_size, group.desired_capacity
+
+    def exit_standby_instances(self, group_name, instance_ids):
+        group = self.autoscaling_groups[group_name]
+        original_size = group.desired_capacity
+        standby_instances = []
+        for instance_state in group.instance_states:
+            if instance_state.instance.id in instance_ids:
+                instance_state.lifecycle_state = "InService"
+                standby_instances.append(instance_state)
+        group.desired_capacity = group.desired_capacity + len(instance_ids)
+        group.set_desired_capacity(group.desired_capacity)
+        return standby_instances, original_size, group.desired_capacity
+
+    def terminate_instance(self, instance_id, should_decrement):
+        instance = self.ec2_backend.get_instance(instance_id)
+        instance_state = next(
+            instance_state
+            for group in self.autoscaling_groups.values()
+            for instance_state in group.instance_states
+            if instance_state.instance.id == instance.id
+        )
+        group = instance.autoscaling_group
+        original_size = group.desired_capacity
+        self.detach_instances(group.name, [instance.id], should_decrement)
+        self.ec2_backend.terminate_instances([instance.id])
+        return instance_state, original_size, group.desired_capacity
 
 
 autoscaling_backends = {}

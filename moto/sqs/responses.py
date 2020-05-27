@@ -232,6 +232,14 @@ class SQSResponse(BaseResponse):
 
         queue_name = self._get_queue_name()
 
+        if not message_group_id:
+            queue = self.sqs_backend.get_queue(queue_name)
+            if queue.attributes.get("FifoQueue", False):
+                return self._error(
+                    "MissingParameter",
+                    "The request must contain the parameter MessageGroupId.",
+                )
+
         message = self.sqs_backend.send_message(
             queue_name,
             message,
@@ -284,6 +292,9 @@ class SQSResponse(BaseResponse):
                     )[0],
                     "MessageAttributes": message_attributes,
                 }
+
+        if entries == {}:
+            raise EmptyBatchRequest()
 
         messages = self.sqs_backend.send_message_batch(queue_name, entries)
 

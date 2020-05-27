@@ -231,6 +231,24 @@ class InvalidVolumeAttachmentError(EC2ClientError):
         )
 
 
+class InvalidVolumeDetachmentError(EC2ClientError):
+    def __init__(self, volume_id, instance_id, device):
+        super(InvalidVolumeDetachmentError, self).__init__(
+            "InvalidAttachment.NotFound",
+            "The volume {0} is not attached to instance {1} as device {2}".format(
+                volume_id, instance_id, device
+            ),
+        )
+
+
+class VolumeInUseError(EC2ClientError):
+    def __init__(self, volume_id, instance_id):
+        super(VolumeInUseError, self).__init__(
+            "VolumeInUse",
+            "Volume {0} is currently attached to {1}".format(volume_id, instance_id),
+        )
+
+
 class InvalidDomainError(EC2ClientError):
     def __init__(self, domain):
         super(InvalidDomainError, self).__init__(
