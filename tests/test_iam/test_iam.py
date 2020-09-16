@@ -5,12 +5,9 @@ import json
 import boto
 import boto3
 import csv
-import os
 import sure  # noqa
-import sys
 from boto.exception import BotoServerError
 from botocore.exceptions import ClientError
-from dateutil.tz import tzutc
 
 from moto import mock_iam, mock_iam_deprecated, settings
 from moto.core import ACCOUNT_ID
@@ -204,6 +201,26 @@ def test_remove_role_from_instance_profile():
 
     profile = conn.get_instance_profile("my-profile")
     dict(profile.roles).should.be.empty
+
+
+@mock_iam()
+def test_delete_instance_profile():
+    conn = boto3.client("iam", region_name="us-east-1")
+    conn.create_role(
+        RoleName="my-role", AssumeRolePolicyDocument="some policy", Path="/my-path/"
+    )
+    conn.create_instance_profile(InstanceProfileName="my-profile")
+    conn.add_role_to_instance_profile(
+        InstanceProfileName="my-profile", RoleName="my-role"
+    )
+    with assert_raises(conn.exceptions.DeleteConflictException):
+        conn.delete_instance_profile(InstanceProfileName="my-profile")
+    conn.remove_role_from_instance_profile(
+        InstanceProfileName="my-profile", RoleName="my-role"
+    )
+    conn.delete_instance_profile(InstanceProfileName="my-profile")
+    with assert_raises(conn.exceptions.NoSuchEntityException):
+        profile = conn.get_instance_profile(InstanceProfileName="my-profile")
 
 
 @mock_iam()
@@ -741,6 +758,12 @@ def test_list_users():
     user["UserName"].should.equal("my-user")
     user["Path"].should.equal("/")
     user["Arn"].should.equal("arn:aws:iam::{}:user/my-user".format(ACCOUNT_ID))
+
+    conn.create_user(UserName="my-user-1", Path="myUser")
+    response = conn.list_users(PathPrefix="my")
+    user = response["Users"][0]
+    user["UserName"].should.equal("my-user-1")
+    user["Path"].should.equal("myUser")
 
 
 @mock_iam()
@@ -1670,11 +1693,15 @@ def test_get_account_authorization_details():
     assert result["RoleDetailList"][0]["AttachedManagedPolicies"][0][
         "PolicyArn"
     ] == "arn:aws:iam::{}:policy/testPolicy".format(ACCOUNT_ID)
+    assert result["RoleDetailList"][0]["RolePolicyList"][0][
+        "PolicyDocument"
+    ] == json.loads(test_policy)
 
     result = conn.get_account_authorization_details(Filter=["User"])
     assert len(result["RoleDetailList"]) == 0
     assert len(result["UserDetailList"]) == 1
     assert len(result["UserDetailList"][0]["GroupList"]) == 1
+    assert len(result["UserDetailList"][0]["UserPolicyList"]) == 1
     assert len(result["UserDetailList"][0]["AttachedManagedPolicies"]) == 1
     assert len(result["GroupDetailList"]) == 0
     assert len(result["Policies"]) == 0
@@ -1685,6 +1712,9 @@ def test_get_account_authorization_details():
     assert result["UserDetailList"][0]["AttachedManagedPolicies"][0][
         "PolicyArn"
     ] == "arn:aws:iam::{}:policy/testPolicy".format(ACCOUNT_ID)
+    assert result["UserDetailList"][0]["UserPolicyList"][0][
+        "PolicyDocument"
+    ] == json.loads(test_policy)
 
     result = conn.get_account_authorization_details(Filter=["Group"])
     assert len(result["RoleDetailList"]) == 0
@@ -1700,6 +1730,9 @@ def test_get_account_authorization_details():
     assert result["GroupDetailList"][0]["AttachedManagedPolicies"][0][
         "PolicyArn"
     ] == "arn:aws:iam::{}:policy/testPolicy".format(ACCOUNT_ID)
+    assert result["GroupDetailList"][0]["GroupPolicyList"][0][
+        "PolicyDocument"
+    ] == json.loads(test_policy)
 
     result = conn.get_account_authorization_details(Filter=["LocalManagedPolicy"])
     assert len(result["RoleDetailList"]) == 0
@@ -2578,6 +2611,7 @@ def test_update_account_password_policy():
             "RequireNumbers": False,
             "RequireSymbols": False,
             "RequireUppercaseCharacters": False,
+            "HardExpiry": False,
         }
     )
 
@@ -2815,3 +2849,36 @@ def test_list_user_tags():
         [{"Key": "Stan", "Value": "The Caddy"}, {"Key": "like-a", "Value": "glove"}]
     )
     response["IsTruncated"].should_not.be.ok
+
+
+@mock_iam()
+def test_delete_role_with_instance_profiles_present():
+    iam = boto3.client("iam", region_name="us-east-1")
+
+    trust_policy = """
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    }
+        """
+    trust_policy = trust_policy.strip()
+
+    iam.create_role(RoleName="Role1", AssumeRolePolicyDocument=trust_policy)
+    iam.create_instance_profile(InstanceProfileName="IP1")
+    iam.add_role_to_instance_profile(InstanceProfileName="IP1", RoleName="Role1")
+
+    iam.create_role(RoleName="Role2", AssumeRolePolicyDocument=trust_policy)
+
+    iam.delete_role(RoleName="Role2")
+
+    role_names = [role["RoleName"] for role in iam.list_roles()["Roles"]]
+    assert "Role1" in role_names
+    assert "Role2" not in role_names

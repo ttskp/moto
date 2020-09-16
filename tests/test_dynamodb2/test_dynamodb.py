@@ -3039,6 +3039,54 @@ def test_batch_items_returns_all():
 
 
 @mock_dynamodb2
+def test_batch_items_throws_exception_when_requesting_100_items_for_single_table():
+    dynamodb = _create_user_table()
+    with assert_raises(ClientError) as ex:
+        dynamodb.batch_get_item(
+            RequestItems={
+                "users": {
+                    "Keys": [
+                        {"username": {"S": "user" + str(i)}} for i in range(0, 104)
+                    ],
+                    "ConsistentRead": True,
+                }
+            }
+        )
+    ex.exception.response["Error"]["Code"].should.equal("ValidationException")
+    msg = ex.exception.response["Error"]["Message"]
+    msg.should.contain("1 validation error detected: Value")
+    msg.should.contain(
+        "at 'requestItems.users.member.keys' failed to satisfy constraint: Member must have length less than or equal to 100"
+    )
+
+
+@mock_dynamodb2
+def test_batch_items_throws_exception_when_requesting_100_items_across_all_tables():
+    dynamodb = _create_user_table()
+    with assert_raises(ClientError) as ex:
+        dynamodb.batch_get_item(
+            RequestItems={
+                "users": {
+                    "Keys": [
+                        {"username": {"S": "user" + str(i)}} for i in range(0, 75)
+                    ],
+                    "ConsistentRead": True,
+                },
+                "users2": {
+                    "Keys": [
+                        {"username": {"S": "user" + str(i)}} for i in range(0, 75)
+                    ],
+                    "ConsistentRead": True,
+                },
+            }
+        )
+    ex.exception.response["Error"]["Code"].should.equal("ValidationException")
+    ex.exception.response["Error"]["Message"].should.equal(
+        "Too many items requested for the BatchGetItem call"
+    )
+
+
+@mock_dynamodb2
 def test_batch_items_with_basic_projection_expression():
     dynamodb = _create_user_table()
     returned_items = dynamodb.batch_get_item(
@@ -5267,4 +5315,102 @@ def test_transact_write_items_fails_with_transaction_canceled_exception():
     ex.exception.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
     ex.exception.response["Error"]["Message"].should.equal(
         "Transaction cancelled, please refer cancellation reasons for specific reasons [None, ConditionalCheckFailed]"
+    )
+
+
+@mock_dynamodb2
+def test_gsi_projection_type_keys_only():
+    table_schema = {
+        "KeySchema": [{"AttributeName": "partitionKey", "KeyType": "HASH"}],
+        "GlobalSecondaryIndexes": [
+            {
+                "IndexName": "GSI-K1",
+                "KeySchema": [
+                    {"AttributeName": "gsiK1PartitionKey", "KeyType": "HASH"},
+                    {"AttributeName": "gsiK1SortKey", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY",},
+            }
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "partitionKey", "AttributeType": "S"},
+            {"AttributeName": "gsiK1PartitionKey", "AttributeType": "S"},
+            {"AttributeName": "gsiK1SortKey", "AttributeType": "S"},
+        ],
+    }
+
+    item = {
+        "partitionKey": "pk-1",
+        "gsiK1PartitionKey": "gsi-pk",
+        "gsiK1SortKey": "gsi-sk",
+        "someAttribute": "lore ipsum",
+    }
+
+    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+    dynamodb.create_table(
+        TableName="test-table", BillingMode="PAY_PER_REQUEST", **table_schema
+    )
+    table = dynamodb.Table("test-table")
+    table.put_item(Item=item)
+
+    items = table.query(
+        KeyConditionExpression=Key("gsiK1PartitionKey").eq("gsi-pk"),
+        IndexName="GSI-K1",
+    )["Items"]
+    items.should.have.length_of(1)
+    # Item should only include GSI Keys and Table Keys, as per the ProjectionType
+    items[0].should.equal(
+        {
+            "gsiK1PartitionKey": "gsi-pk",
+            "gsiK1SortKey": "gsi-sk",
+            "partitionKey": "pk-1",
+        }
+    )
+
+
+@mock_dynamodb2
+def test_lsi_projection_type_keys_only():
+    table_schema = {
+        "KeySchema": [
+            {"AttributeName": "partitionKey", "KeyType": "HASH"},
+            {"AttributeName": "sortKey", "KeyType": "RANGE"},
+        ],
+        "LocalSecondaryIndexes": [
+            {
+                "IndexName": "LSI",
+                "KeySchema": [
+                    {"AttributeName": "partitionKey", "KeyType": "HASH"},
+                    {"AttributeName": "lsiK1SortKey", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY",},
+            }
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "partitionKey", "AttributeType": "S"},
+            {"AttributeName": "sortKey", "AttributeType": "S"},
+            {"AttributeName": "lsiK1SortKey", "AttributeType": "S"},
+        ],
+    }
+
+    item = {
+        "partitionKey": "pk-1",
+        "sortKey": "sk-1",
+        "lsiK1SortKey": "lsi-sk",
+        "someAttribute": "lore ipsum",
+    }
+
+    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+    dynamodb.create_table(
+        TableName="test-table", BillingMode="PAY_PER_REQUEST", **table_schema
+    )
+    table = dynamodb.Table("test-table")
+    table.put_item(Item=item)
+
+    items = table.query(
+        KeyConditionExpression=Key("partitionKey").eq("pk-1"), IndexName="LSI",
+    )["Items"]
+    items.should.have.length_of(1)
+    # Item should only include GSI Keys and Table Keys, as per the ProjectionType
+    items[0].should.equal(
+        {"partitionKey": "pk-1", "sortKey": "sk-1", "lsiK1SortKey": "lsi-sk"}
     )

@@ -23,6 +23,11 @@ from moto import mock_ec2_deprecated, mock_ec2, mock_cloudformation
 from tests.helpers import requires_boto_gte
 
 
+if six.PY2:
+    decode_method = base64.decodestring
+else:
+    decode_method = base64.decodebytes
+
 ################ Test Readme ###############
 def add_servers(ami_id, count):
     conn = boto.connect_ec2()
@@ -128,7 +133,35 @@ def test_instance_terminate_discard_volumes():
 
 
 @mock_ec2
-def test_instance_terminate_keep_volumes():
+def test_instance_terminate_keep_volumes_explicit():
+
+    ec2_resource = boto3.resource("ec2", "us-west-1")
+
+    result = ec2_resource.create_instances(
+        ImageId="ami-d3adb33f",
+        MinCount=1,
+        MaxCount=1,
+        BlockDeviceMappings=[
+            {
+                "DeviceName": "/dev/sda1",
+                "Ebs": {"VolumeSize": 50, "DeleteOnTermination": False},
+            }
+        ],
+    )
+    instance = result[0]
+
+    instance_volume_ids = []
+    for volume in instance.volumes.all():
+        instance_volume_ids.append(volume.volume_id)
+
+    instance.terminate()
+    instance.wait_until_terminated()
+
+    assert len(list(ec2_resource.volumes.all())) == 1
+
+
+@mock_ec2
+def test_instance_terminate_keep_volumes_implicit():
     ec2_resource = boto3.resource("ec2", "us-west-1")
 
     result = ec2_resource.create_instances(
@@ -509,6 +542,20 @@ def test_get_instances_filtering_by_image_id():
 
 
 @mock_ec2
+def test_get_instances_filtering_by_account_id():
+    image_id = "ami-1234abcd"
+    client = boto3.client("ec2", region_name="us-east-1")
+    conn = boto3.resource("ec2", "us-east-1")
+    conn.create_instances(ImageId=image_id, MinCount=1, MaxCount=1)
+
+    reservations = client.describe_instances(
+        Filters=[{"Name": "owner-id", "Values": ["123456789012"]}]
+    )["Reservations"]
+
+    reservations[0]["Instances"].should.have.length_of(1)
+
+
+@mock_ec2
 def test_get_instances_filtering_by_private_dns():
     image_id = "ami-1234abcd"
     client = boto3.client("ec2", region_name="us-east-1")
@@ -866,7 +913,7 @@ def test_user_data_with_run_instance():
     instance_attribute = instance.get_attribute("userData")
     instance_attribute.should.be.a(InstanceAttribute)
     retrieved_user_data = instance_attribute.get("userData").encode("utf-8")
-    decoded_user_data = base64.decodestring(retrieved_user_data)
+    decoded_user_data = decode_method(retrieved_user_data)
     decoded_user_data.should.equal(b"some user data")
 
 

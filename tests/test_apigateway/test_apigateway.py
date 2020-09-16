@@ -544,6 +544,7 @@ def test_integration_response():
         selectionPattern="foobar",
         responseTemplates={},
     )
+
     # this is hard to match against, so remove it
     response["ResponseMetadata"].pop("HTTPHeaders", None)
     response["ResponseMetadata"].pop("RetryAttempts", None)
@@ -591,6 +592,63 @@ def test_integration_response():
 
     response = client.get_method(restApiId=api_id, resourceId=root_id, httpMethod="GET")
     response["methodIntegration"]["integrationResponses"].should.equal({})
+
+    # adding a new method and perfomring put intergration with contentHandling as CONVERT_TO_BINARY
+    client.put_method(
+        restApiId=api_id, resourceId=root_id, httpMethod="PUT", authorizationType="none"
+    )
+
+    client.put_method_response(
+        restApiId=api_id, resourceId=root_id, httpMethod="PUT", statusCode="200"
+    )
+
+    client.put_integration(
+        restApiId=api_id,
+        resourceId=root_id,
+        httpMethod="PUT",
+        type="HTTP",
+        uri="http://httpbin.org/robots.txt",
+        integrationHttpMethod="POST",
+    )
+
+    response = client.put_integration_response(
+        restApiId=api_id,
+        resourceId=root_id,
+        httpMethod="PUT",
+        statusCode="200",
+        selectionPattern="foobar",
+        responseTemplates={},
+        contentHandling="CONVERT_TO_BINARY",
+    )
+
+    # this is hard to match against, so remove it
+    response["ResponseMetadata"].pop("HTTPHeaders", None)
+    response["ResponseMetadata"].pop("RetryAttempts", None)
+    response.should.equal(
+        {
+            "statusCode": "200",
+            "selectionPattern": "foobar",
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+            "responseTemplates": {"application/json": None},
+            "contentHandling": "CONVERT_TO_BINARY",
+        }
+    )
+
+    response = client.get_integration_response(
+        restApiId=api_id, resourceId=root_id, httpMethod="PUT", statusCode="200"
+    )
+    # this is hard to match against, so remove it
+    response["ResponseMetadata"].pop("HTTPHeaders", None)
+    response["ResponseMetadata"].pop("RetryAttempts", None)
+    response.should.equal(
+        {
+            "statusCode": "200",
+            "selectionPattern": "foobar",
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+            "responseTemplates": {"application/json": None},
+            "contentHandling": "CONVERT_TO_BINARY",
+        }
+    )
 
 
 @mock_apigateway
@@ -1787,12 +1845,34 @@ def test_create_api_key():
     apikey_name = "TESTKEY1"
     payload = {"value": apikey_value, "name": apikey_name}
 
-    client.create_api_key(**payload)
+    response = client.create_api_key(**payload)
+    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(201)
+    response["name"].should.equal(apikey_name)
+    response["value"].should.equal(apikey_value)
+    response["enabled"].should.equal(False)
+    response["stageKeys"].should.equal([])
 
     response = client.get_api_keys()
     len(response["items"]).should.equal(1)
 
     client.create_api_key.when.called_with(**payload).should.throw(ClientError)
+
+
+@mock_apigateway
+def test_create_api_headers():
+    region_name = "us-west-2"
+    client = boto3.client("apigateway", region_name=region_name)
+
+    apikey_value = "12345"
+    apikey_name = "TESTKEY1"
+    payload = {"value": apikey_value, "name": apikey_name}
+
+    client.create_api_key(**payload)
+    with assert_raises(ClientError) as ex:
+        client.create_api_key(**payload)
+    ex.exception.response["Error"]["Code"].should.equal("ConflictException")
+    if not settings.TEST_SERVER_MODE:
+        ex.exception.response["ResponseMetadata"]["HTTPHeaders"].should.equal({})
 
 
 @mock_apigateway
@@ -1844,7 +1924,8 @@ def test_api_keys():
     response = client.get_api_keys()
     len(response["items"]).should.equal(2)
 
-    client.delete_api_key(apiKey=apikey_id)
+    response = client.delete_api_key(apiKey=apikey_id)
+    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(202)
 
     response = client.get_api_keys()
     len(response["items"]).should.equal(1)
@@ -1925,6 +2006,7 @@ def test_usage_plan_keys():
     key_type = "API_KEY"
     payload = {"usagePlanId": usage_plan_id, "keyId": key_id, "keyType": key_type}
     response = client.create_usage_plan_key(**payload)
+    response["ResponseMetadata"]["HTTPStatusCode"].should.equals(201)
     usage_plan_key_id = response["id"]
 
     # Get current plan keys (expect 1)

@@ -150,14 +150,15 @@ class EventsHandler(BaseResponse):
     def put_events(self):
         events = self._get_param("Entries")
 
-        failed_entries = self.events_backend.put_events(events)
+        entries = self.events_backend.put_events(events)
 
-        if failed_entries:
-            return json.dumps(
-                {"FailedEntryCount": len(failed_entries), "Entries": failed_entries}
-            )
+        failed_count = len([e for e in entries if "ErrorCode" in e])
+        response = {
+            "FailedEntryCount": failed_count,
+            "Entries": entries,
+        }
 
-        return "", self.response_headers
+        return json.dumps(response)
 
     def put_rule(self):
         name = self._get_param("Name")
@@ -182,9 +183,9 @@ class EventsHandler(BaseResponse):
 
         if sched_exp:
             if not (
-                re.match("^cron\(.*\)", sched_exp)
+                re.match(r"^cron\(.*\)", sched_exp)
                 or re.match(
-                    "^rate\(\d*\s(minute|minutes|hour|hours|day|days)\)", sched_exp
+                    r"^rate\(\d*\s(minute|minutes|hour|hours|day|days)\)", sched_exp
                 )
             ):
                 return self.error(
@@ -217,7 +218,10 @@ class EventsHandler(BaseResponse):
                 "ResourceNotFoundException", "Rule " + rule_name + " does not exist."
             )
 
-        return "", self.response_headers
+        return (
+            json.dumps({"FailedEntryCount": 0, "FailedEntries": []}),
+            self.response_headers,
+        )
 
     def remove_targets(self):
         rule_name = self._get_param("Rule")

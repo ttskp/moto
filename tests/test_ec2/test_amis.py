@@ -774,6 +774,26 @@ def test_ami_describe_non_existent():
 
 
 @mock_ec2
+def test_ami_registration():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    image_id = ec2.register_image(Name="test-register-image").get("ImageId", "")
+    images = ec2.describe_images(ImageIds=[image_id]).get("Images", [])
+    assert images[0]["Name"] == "test-register-image", "No image was registered."
+    assert images[0]["RootDeviceName"] == "/dev/sda1", "Wrong root device name."
+    assert images[0]["State"] == "available", "State should be available."
+
+
+@mock_ec2
+def test_ami_registration():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    image_id = ec2.register_image(Name="test-register-image").get("ImageId", "")
+    images = ec2.describe_images(ImageIds=[image_id]).get("Images", [])
+    assert images[0]["Name"] == "test-register-image", "No image was registered."
+    assert images[0]["RootDeviceName"] == "/dev/sda1", "Wrong root device name."
+    assert images[0]["State"] == "available", "State should be available."
+
+
+@mock_ec2
 def test_ami_filter_wildcard():
     ec2_resource = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -843,7 +863,11 @@ def test_ami_snapshots_have_correct_owner():
         ]
         existing_snapshot_ids = owner_id_to_snapshot_ids.get(owner_id, [])
         owner_id_to_snapshot_ids[owner_id] = existing_snapshot_ids + snapshot_ids
-
+        # adding an assertion to volumeType
+        assert (
+            image.get("BlockDeviceMappings", {})[0].get("Ebs", {}).get("VolumeType")
+            == "standard"
+        )
     for owner_id in owner_id_to_snapshot_ids:
         snapshots_rseponse = ec2_client.describe_snapshots(
             SnapshotIds=owner_id_to_snapshot_ids[owner_id]

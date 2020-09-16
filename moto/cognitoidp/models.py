@@ -21,11 +21,15 @@ from .exceptions import (
     ResourceNotFoundError,
     UserNotFoundError,
     UsernameExistsException,
+    UserNotConfirmedException,
+    InvalidParameterException,
 )
+from .utils import create_id, check_secret_hash
 
 UserStatus = {
     "FORCE_CHANGE_PASSWORD": "FORCE_CHANGE_PASSWORD",
     "CONFIRMED": "CONFIRMED",
+    "UNCONFIRMED": "UNCONFIRMED",
 }
 
 
@@ -83,6 +87,7 @@ class CognitoIdpUserPool(BaseModel):
         self.identity_providers = OrderedDict()
         self.groups = OrderedDict()
         self.users = OrderedDict()
+        self.resource_servers = OrderedDict()
         self.refresh_tokens = {}
         self.access_tokens = {}
         self.id_tokens = {}
@@ -128,8 +133,12 @@ class CognitoIdpUserPool(BaseModel):
             "exp": now + expires_in,
         }
         payload.update(extra_data)
+        headers = {"kid": "dummy"}  # KID as present in jwks-public.json
 
-        return jws.sign(payload, self.json_web_key, algorithm="RS256"), expires_in
+        return (
+            jws.sign(payload, self.json_web_key, headers, algorithm="RS256"),
+            expires_in,
+        )
 
     def create_id_token(self, client_id, username):
         extra_data = self.get_user_extra_data_by_client_id(client_id, username)
@@ -206,10 +215,11 @@ class CognitoIdpUserPoolDomain(BaseModel):
 
 
 class CognitoIdpUserPoolClient(BaseModel):
-    def __init__(self, user_pool_id, extended_config):
+    def __init__(self, user_pool_id, generate_secret, extended_config):
         self.user_pool_id = user_pool_id
-        self.id = str(uuid.uuid4())
+        self.id = create_id()
         self.secret = str(uuid.uuid4())
+        self.generate_secret = generate_secret or False
         self.extended_config = extended_config or {}
 
     def _base_json(self):
@@ -221,6 +231,8 @@ class CognitoIdpUserPoolClient(BaseModel):
 
     def to_json(self, extended=False):
         user_pool_client_json = self._base_json()
+        if self.generate_secret:
+            user_pool_client_json.update({"ClientSecret": self.secret})
         if extended:
             user_pool_client_json.update(self.extended_config)
 
@@ -290,6 +302,9 @@ class CognitoIdpUser(BaseModel):
         self.attributes = attributes
         self.create_date = datetime.datetime.utcnow()
         self.last_modified_date = datetime.datetime.utcnow()
+        self.sms_mfa_enabled = False
+        self.software_token_mfa_enabled = False
+        self.token_verified = False
 
         # Groups this user is a member of.
         # Note that these links are bidirectional.
@@ -306,6 +321,11 @@ class CognitoIdpUser(BaseModel):
 
     # list_users brings back "Attributes" while admin_get_user brings back "UserAttributes".
     def to_json(self, extended=False, attributes_key="Attributes"):
+        user_mfa_setting_list = []
+        if self.software_token_mfa_enabled:
+            user_mfa_setting_list.append("SOFTWARE_TOKEN_MFA")
+        elif self.sms_mfa_enabled:
+            user_mfa_setting_list.append("SMS_MFA")
         user_json = self._base_json()
         if extended:
             user_json.update(
@@ -313,6 +333,7 @@ class CognitoIdpUser(BaseModel):
                     "Enabled": self.enabled,
                     attributes_key: self.attributes,
                     "MFAOptions": [],
+                    "UserMFASettingList": user_mfa_setting_list,
                 }
             )
 
@@ -335,6 +356,27 @@ class CognitoIdpUser(BaseModel):
         flat_attributes = self._flatten_attrs(self.attributes)
         new_flat_attributes = {key: val for key, val in flat_attributes.items() if key not in attribute_names}
         self.attributes = self._expand_attrs(new_flat_attributes)
+
+
+class CognitoResourceServer(BaseModel):
+    def __init__(self, user_pool_id, identifier, name, scopes):
+
+        self.user_pool_id = user_pool_id
+        self.identifier = identifier
+        self.name = name
+        self.scopes = scopes
+
+    def to_json(self):
+        res = {
+            "UserPoolId": self.user_pool_id,
+            "Identifier": self.identifier,
+            "Name": self.name,
+        }
+
+        if len(self.scopes) != 0:
+            res.update({"Scopes": self.scopes})
+
+        return res
 
 
 class CognitoIdpBackend(BaseBackend):
@@ -405,12 +447,14 @@ class CognitoIdpBackend(BaseBackend):
         return user_pool_domain
 
     # User pool client
-    def create_user_pool_client(self, user_pool_id, extended_config):
+    def create_user_pool_client(self, user_pool_id, generate_secret, extended_config):
         user_pool = self.user_pools.get(user_pool_id)
         if not user_pool:
             raise ResourceNotFoundError(user_pool_id)
 
-        user_pool_client = CognitoIdpUserPoolClient(user_pool_id, extended_config)
+        user_pool_client = CognitoIdpUserPoolClient(
+            user_pool_id, generate_secret, extended_config
+        )
         user_pool.clients[user_pool_client.id] = user_pool_client
         return user_pool_client
 
@@ -731,6 +775,9 @@ class CognitoIdpBackend(BaseBackend):
     def respond_to_auth_challenge(
         self, session, client_id, challenge_name, challenge_responses
     ):
+        if challenge_name == "PASSWORD_VERIFIER":
+            session = challenge_responses.get("PASSWORD_CLAIM_SECRET_BLOCK")
+
         user_pool = self.sessions.get(session)
         if not user_pool:
             raise ResourceNotFoundError(session)
@@ -751,6 +798,62 @@ class CognitoIdpBackend(BaseBackend):
             del self.sessions[session]
 
             return self._log_user_in(user_pool, client, username)
+        elif challenge_name == "PASSWORD_VERIFIER":
+            username = challenge_responses.get("USERNAME")
+            user = user_pool.users.get(username)
+            if not user:
+                raise UserNotFoundError(username)
+
+            password_claim_signature = challenge_responses.get(
+                "PASSWORD_CLAIM_SIGNATURE"
+            )
+            if not password_claim_signature:
+                raise ResourceNotFoundError(password_claim_signature)
+            password_claim_secret_block = challenge_responses.get(
+                "PASSWORD_CLAIM_SECRET_BLOCK"
+            )
+            if not password_claim_secret_block:
+                raise ResourceNotFoundError(password_claim_secret_block)
+            timestamp = challenge_responses.get("TIMESTAMP")
+            if not timestamp:
+                raise ResourceNotFoundError(timestamp)
+
+            if user.software_token_mfa_enabled:
+                return {
+                    "ChallengeName": "SOFTWARE_TOKEN_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
+            if user.sms_mfa_enabled:
+                return {
+                    "ChallengeName": "SMS_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
+            del self.sessions[session]
+            return self._log_user_in(user_pool, client, username)
+        elif challenge_name == "SOFTWARE_TOKEN_MFA":
+            username = challenge_responses.get("USERNAME")
+            user = user_pool.users.get(username)
+            if not user:
+                raise UserNotFoundError(username)
+
+            software_token_mfa_code = challenge_responses.get("SOFTWARE_TOKEN_MFA_CODE")
+            if not software_token_mfa_code:
+                raise ResourceNotFoundError(software_token_mfa_code)
+
+            if client.generate_secret:
+                secret_hash = challenge_responses.get("SECRET_HASH")
+                if not check_secret_hash(
+                    client.secret, client.id, username, secret_hash
+                ):
+                    raise NotAuthorizedError(secret_hash)
+
+            del self.sessions[session]
+            return self._log_user_in(user_pool, client, username)
+
         else:
             return {}
 
@@ -792,52 +895,65 @@ class CognitoIdpBackend(BaseBackend):
         user = user_pool.users[username]
         user.update_attributes(attributes)
 
-    def update_user_attributes(self, access_token, attributes):
-        for user_pool in self.user_pools.values():
-            if access_token in user_pool.access_tokens:
-                _, username = user_pool.access_tokens[access_token]
-                user = user_pool.users.get(username)
+    def create_resource_server(self, user_pool_id, identifier, name, scopes):
+        user_pool = self.user_pools.get(user_pool_id)
+        if not user_pool:
+            raise ResourceNotFoundError(user_pool_id)
 
-                if not user:
-                    raise UserNotFoundError(username)
+        if identifier in user_pool.resource_servers:
+            raise InvalidParameterException(
+                "%s already exists in user pool %s." % (identifier, user_pool_id)
+            )
 
-                user.update_attributes(attributes)
-                break
+        resource_server = CognitoResourceServer(user_pool_id, identifier, name, scopes)
+        user_pool.resource_servers[identifier] = resource_server
+        return resource_server
 
-    def delete_user_attributes(self, access_token, attribute_names):
-        for user_pool in self.user_pools.values():
-            if access_token in user_pool.access_tokens:
-                _, username = user_pool.access_tokens[access_token]
-                user = user_pool.users.get(username)
+    def sign_up(self, client_id, username, password, attributes):
+        user_pool = None
+        for p in self.user_pools.values():
+            if client_id in p.clients:
+                user_pool = p
+        if user_pool is None:
+            raise ResourceNotFoundError(client_id)
 
-                if not user:
-                    raise UserNotFoundError(username)
+        user = CognitoIdpUser(
+            user_pool_id=user_pool.id,
+            username=username,
+            password=password,
+            attributes=attributes,
+            status=UserStatus["UNCONFIRMED"],
+        )
+        user_pool.users[user.username] = user
+        return user
 
-                user.delete_attributes(set(attribute_names))
-                break
+    def confirm_sign_up(self, client_id, username, confirmation_code):
+        user_pool = None
+        for p in self.user_pools.values():
+            if client_id in p.clients:
+                user_pool = p
+        if user_pool is None:
+            raise ResourceNotFoundError(client_id)
 
-cognitoidp_backends = {}
-for region in Session().get_available_regions("cognito-idp"):
-    cognitoidp_backends[region] = CognitoIdpBackend(region)
-for region in Session().get_available_regions(
-    "cognito-idp", partition_name="aws-us-gov"
-):
-    cognitoidp_backends[region] = CognitoIdpBackend(region)
-for region in Session().get_available_regions("cognito-idp", partition_name="aws-cn"):
-    cognitoidp_backends[region] = CognitoIdpBackend(region)
+        if username not in user_pool.users:
+            raise UserNotFoundError(username)
 
+        user = user_pool.users[username]
+        user.status = UserStatus["CONFIRMED"]
+        return ""
 
-# Hack to help moto-server process requests on localhost, where the region isn't
-# specified in the host header. Some endpoints (change password, confirm forgot
-# password) have no authorization header from which to extract the region.
-def find_region_by_value(key, value):
-    for region in cognitoidp_backends:
-        backend = cognitoidp_backends[region]
-        for user_pool in backend.user_pools.values():
-            if key == "client_id" and value in user_pool.clients:
-                return region
+    def initiate_auth(self, client_id, auth_flow, auth_parameters):
+        user_pool = None
+        for p in self.user_pools.values():
+            if client_id in p.clients:
+                user_pool = p
+        if user_pool is None:
+            raise ResourceNotFoundError(client_id)
 
-            if key == "access_token" and value in user_pool.access_tokens:
-                return region
+        client = p.clients.get(client_id)
 
-    return cognitoidp_backends.keys()[0]
+        if auth_flow == "USER_SRP_AUTH":
+            username = auth_parameters.get("USERNAME")
+            srp_a = auth_parameters.get("SRP_A")
+            if not srp_a:
+                raise ResourceNotFoundError(srp_a)

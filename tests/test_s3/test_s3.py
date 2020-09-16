@@ -2,16 +2,14 @@
 from __future__ import unicode_literals
 
 import datetime
-import os
 import sys
-
+import os
 from boto3 import Session
 from six.moves.urllib.request import urlopen
 from six.moves.urllib.error import HTTPError
 from functools import wraps
 from gzip import GzipFile
 from io import BytesIO
-import mimetypes
 import zlib
 import pickle
 import uuid
@@ -1041,6 +1039,45 @@ def test_s3_object_in_public_bucket_using_multiple_presigned_urls():
 
 
 @mock_s3
+def test_streaming_upload_from_file_to_presigned_url():
+    s3 = boto3.resource("s3", region_name="us-east-1")
+    bucket = s3.Bucket("test-bucket")
+    bucket.create()
+    bucket.put_object(Body=b"ABCD", Key="file.txt")
+
+    params = {"Bucket": "test-bucket", "Key": "file.txt"}
+    presigned_url = boto3.client("s3").generate_presigned_url(
+        "put_object", params, ExpiresIn=900
+    )
+    with open(__file__, "rb") as f:
+        response = requests.get(presigned_url, data=f)
+    assert response.status_code == 200
+
+
+@mock_s3
+def test_multipart_upload_from_file_to_presigned_url():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    s3.create_bucket(Bucket="mybucket")
+
+    params = {"Bucket": "mybucket", "Key": "file_upload"}
+    presigned_url = boto3.client("s3").generate_presigned_url(
+        "put_object", params, ExpiresIn=900
+    )
+
+    file = open("text.txt", "w")
+    file.write("test")
+    file.close()
+    files = {"upload_file": open("text.txt", "rb")}
+
+    requests.put(presigned_url, files=files)
+    resp = s3.get_object(Bucket="mybucket", Key="file_upload")
+    data = resp["Body"].read()
+    assert data == b"test"
+    # cleanup
+    os.remove("text.txt")
+
+
+@mock_s3
 def test_s3_object_in_private_bucket():
     s3 = boto3.resource("s3")
     bucket = s3.Bucket("test-bucket")
@@ -1961,6 +1998,15 @@ def test_boto3_bucket_create_eu_central():
 
 
 @mock_s3
+def test_bucket_create_empty_bucket_configuration_should_return_malformed_xml_error():
+    s3 = boto3.resource("s3", region_name="us-east-1")
+    with assert_raises(ClientError) as e:
+        s3.create_bucket(Bucket="whatever", CreateBucketConfiguration={})
+    e.exception.response["Error"]["Code"].should.equal("MalformedXML")
+    e.exception.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+
+
+@mock_s3
 def test_boto3_head_object():
     s3 = boto3.resource("s3", region_name=DEFAULT_REGION_NAME)
     s3.create_bucket(Bucket="blah")
@@ -2270,6 +2316,30 @@ def test_boto3_delete_versioned_bucket():
 
 
 @mock_s3
+def test_boto3_delete_versioned_bucket_returns_meta():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+
+    client.create_bucket(Bucket="blah")
+    client.put_bucket_versioning(
+        Bucket="blah", VersioningConfiguration={"Status": "Enabled"}
+    )
+
+    put_resp = client.put_object(Bucket="blah", Key="test1", Body=b"test1")
+
+    # Delete the object
+    del_resp = client.delete_object(Bucket="blah", Key="test1")
+    assert "DeleteMarker" not in del_resp
+    assert del_resp["VersionId"] is not None
+
+    # Delete the delete marker
+    del_resp2 = client.delete_object(
+        Bucket="blah", Key="test1", VersionId=del_resp["VersionId"]
+    )
+    assert del_resp2["DeleteMarker"] == True
+    assert "VersionId" not in del_resp2
+
+
+@mock_s3
 def test_boto3_get_object_if_modified_since():
     s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
     bucket_name = "blah"
@@ -2290,6 +2360,64 @@ def test_boto3_get_object_if_modified_since():
 
 
 @mock_s3
+def test_boto3_get_object_if_unmodified_since():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    s3.put_object(Bucket=bucket_name, Key=key, Body="test")
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.get_object(
+            Bucket=bucket_name,
+            Key=key,
+            IfUnmodifiedSince=datetime.datetime.utcnow() - datetime.timedelta(hours=1),
+        )
+    e = err.exception
+    e.response["Error"]["Code"].should.equal("PreconditionFailed")
+    e.response["Error"]["Condition"].should.equal("If-Unmodified-Since")
+
+
+@mock_s3
+def test_boto3_get_object_if_match():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    s3.put_object(Bucket=bucket_name, Key=key, Body="test")
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.get_object(
+            Bucket=bucket_name, Key=key, IfMatch='"hello"',
+        )
+    e = err.exception
+    e.response["Error"]["Code"].should.equal("PreconditionFailed")
+    e.response["Error"]["Condition"].should.equal("If-Match")
+
+
+@mock_s3
+def test_boto3_get_object_if_none_match():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    etag = s3.put_object(Bucket=bucket_name, Key=key, Body="test")["ETag"]
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.get_object(
+            Bucket=bucket_name, Key=key, IfNoneMatch=etag,
+        )
+    e = err.exception
+    e.response["Error"].should.equal({"Code": "304", "Message": "Not Modified"})
+
+
+@mock_s3
 def test_boto3_head_object_if_modified_since():
     s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
     bucket_name = "blah"
@@ -2304,6 +2432,62 @@ def test_boto3_head_object_if_modified_since():
             Bucket=bucket_name,
             Key=key,
             IfModifiedSince=datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+        )
+    e = err.exception
+    e.response["Error"].should.equal({"Code": "304", "Message": "Not Modified"})
+
+
+@mock_s3
+def test_boto3_head_object_if_unmodified_since():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    s3.put_object(Bucket=bucket_name, Key=key, Body="test")
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.head_object(
+            Bucket=bucket_name,
+            Key=key,
+            IfUnmodifiedSince=datetime.datetime.utcnow() - datetime.timedelta(hours=1),
+        )
+    e = err.exception
+    e.response["Error"].should.equal({"Code": "412", "Message": "Precondition Failed"})
+
+
+@mock_s3
+def test_boto3_head_object_if_match():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    s3.put_object(Bucket=bucket_name, Key=key, Body="test")
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.head_object(
+            Bucket=bucket_name, Key=key, IfMatch='"hello"',
+        )
+    e = err.exception
+    e.response["Error"].should.equal({"Code": "412", "Message": "Precondition Failed"})
+
+
+@mock_s3
+def test_boto3_head_object_if_none_match():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = "hello.txt"
+
+    etag = s3.put_object(Bucket=bucket_name, Key=key, Body="test")["ETag"]
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.head_object(
+            Bucket=bucket_name, Key=key, IfNoneMatch=etag,
         )
     e = err.exception
     e.response["Error"].should.equal({"Code": "304", "Message": "Not Modified"})
@@ -2399,9 +2583,13 @@ def test_boto3_put_object_with_tagging():
 
     s3.put_object(Bucket=bucket_name, Key=key, Body="test", Tagging="foo=bar")
 
-    resp = s3.get_object_tagging(Bucket=bucket_name, Key=key)
+    s3.get_object_tagging(Bucket=bucket_name, Key=key)["TagSet"].should.contain(
+        {"Key": "foo", "Value": "bar"}
+    )
 
-    resp["TagSet"].should.contain({"Key": "foo", "Value": "bar"})
+    s3.delete_object_tagging(Bucket=bucket_name, Key=key)
+
+    s3.get_object_tagging(Bucket=bucket_name, Key=key)["TagSet"].should.equal([])
 
 
 @mock_s3
@@ -2748,6 +2936,39 @@ def test_put_bucket_acl_body():
         Bucket="bucket", AccessControlPolicy={"Grants": [], "Owner": bucket_owner}
     )
     assert not result.get("Grants")
+
+
+@mock_s3
+def test_object_acl_with_presigned_post():
+    s3 = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+
+    bucket_name = "imageS3Bucket"
+    object_name = "text.txt"
+    fields = {"acl": "public-read"}
+    file = open("text.txt", "w")
+    file.write("test")
+    file.close()
+
+    s3.create_bucket(Bucket=bucket_name)
+    response = s3.generate_presigned_post(
+        bucket_name, object_name, Fields=fields, ExpiresIn=60000
+    )
+
+    with open(object_name, "rb") as f:
+        files = {"file": (object_name, f)}
+        requests.post(response["url"], data=response["fields"], files=files)
+
+    response = s3.get_object_acl(Bucket=bucket_name, Key=object_name)
+
+    assert "Grants" in response
+    assert len(response["Grants"]) == 2
+    assert response["Grants"][1]["Permission"] == "READ"
+
+    response = s3.get_object(Bucket=bucket_name, Key=object_name)
+
+    assert "ETag" in response
+    assert "Body" in response
+    os.remove("text.txt")
 
 
 @mock_s3
@@ -4364,7 +4585,7 @@ def test_s3_config_dict():
 
     # With 1 bucket in us-west-2:
     s3_config_query.backends["global"].create_bucket("bucket1", "us-west-2")
-    s3_config_query.backends["global"].put_bucket_tags("bucket1", tags)
+    s3_config_query.backends["global"].put_bucket_tagging("bucket1", tags)
 
     # With a log bucket:
     s3_config_query.backends["global"].create_bucket("logbucket", "us-west-2")
@@ -4521,3 +4742,139 @@ def test_creating_presigned_post():
         ].read()
         == fdata
     )
+
+
+@mock_s3
+def test_encryption():
+    # Create Bucket so that test can run
+    conn = boto3.client("s3", region_name="us-east-1")
+    conn.create_bucket(Bucket="mybucket")
+
+    with assert_raises(ClientError) as exc:
+        conn.get_bucket_encryption(Bucket="mybucket")
+
+    sse_config = {
+        "Rules": [
+            {
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "aws:kms",
+                    "KMSMasterKeyID": "12345678",
+                }
+            }
+        ]
+    }
+
+    conn.put_bucket_encryption(
+        Bucket="mybucket", ServerSideEncryptionConfiguration=sse_config
+    )
+
+    resp = conn.get_bucket_encryption(Bucket="mybucket")
+    assert "ServerSideEncryptionConfiguration" in resp
+    assert resp["ServerSideEncryptionConfiguration"] == sse_config
+
+    conn.delete_bucket_encryption(Bucket="mybucket")
+    with assert_raises(ClientError) as exc:
+        conn.get_bucket_encryption(Bucket="mybucket")
+
+
+@mock_s3
+def test_presigned_url_restrict_parameters():
+    # Only specific params can be set
+    # Ensure error is thrown when adding custom metadata this way
+    bucket = str(uuid.uuid4())
+    key = "file.txt"
+    conn = boto3.resource("s3", region_name="us-east-1")
+    conn.create_bucket(Bucket=bucket)
+    s3 = boto3.client("s3", region_name="us-east-1")
+
+    # Create a pre-signed url with some metadata.
+    with assert_raises(botocore.exceptions.ParamValidationError) as err:
+        s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={"Bucket": bucket, "Key": key, "Unknown": "metadata"},
+        )
+    assert str(err.exception).should.match(
+        r'Parameter validation failed:\nUnknown parameter in input: "Unknown", must be one of:.*'
+    )
+
+    s3.delete_bucket(Bucket=bucket)
+
+
+@mock_s3
+def test_presigned_put_url_with_approved_headers():
+    bucket = str(uuid.uuid4())
+    key = "file.txt"
+    content = b"filecontent"
+    expected_contenttype = "app/sth"
+    conn = boto3.resource("s3", region_name="us-east-1")
+    conn.create_bucket(Bucket=bucket)
+    s3 = boto3.client("s3", region_name="us-east-1")
+
+    # Create a pre-signed url with some metadata.
+    url = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={"Bucket": bucket, "Key": key, "ContentType": expected_contenttype},
+    )
+
+    # Verify S3 throws an error when the header is not provided
+    response = requests.put(url, data=content)
+    response.status_code.should.equal(403)
+    str(response.content).should.contain("<Code>SignatureDoesNotMatch</Code>")
+    str(response.content).should.contain(
+        "<Message>The request signature we calculated does not match the signature you provided. Check your key and signing method.</Message>"
+    )
+
+    # Verify S3 throws an error when the header has the wrong value
+    response = requests.put(
+        url, data=content, headers={"Content-Type": "application/unknown"}
+    )
+    response.status_code.should.equal(403)
+    str(response.content).should.contain("<Code>SignatureDoesNotMatch</Code>")
+    str(response.content).should.contain(
+        "<Message>The request signature we calculated does not match the signature you provided. Check your key and signing method.</Message>"
+    )
+
+    # Verify S3 uploads correctly when providing the meta data
+    response = requests.put(
+        url, data=content, headers={"Content-Type": expected_contenttype}
+    )
+    response.status_code.should.equal(200)
+
+    # Assert the object exists
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    obj["ContentType"].should.equal(expected_contenttype)
+    obj["ContentLength"].should.equal(11)
+    obj["Body"].read().should.equal(content)
+    obj["Metadata"].should.equal({})
+
+    s3.delete_object(Bucket=bucket, Key=key)
+    s3.delete_bucket(Bucket=bucket)
+
+
+@mock_s3
+def test_presigned_put_url_with_custom_headers():
+    bucket = str(uuid.uuid4())
+    key = "file.txt"
+    content = b"filecontent"
+    conn = boto3.resource("s3", region_name="us-east-1")
+    conn.create_bucket(Bucket=bucket)
+    s3 = boto3.client("s3", region_name="us-east-1")
+
+    # Create a pre-signed url with some metadata.
+    url = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={"Bucket": bucket, "Key": key, "Metadata": {"venue": "123"}},
+    )
+
+    # Verify S3 uploads correctly when providing the meta data
+    response = requests.put(url, data=content)
+    response.status_code.should.equal(200)
+
+    # Assert the object exists
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    obj["ContentLength"].should.equal(11)
+    obj["Body"].read().should.equal(content)
+    obj["Metadata"].should.equal({"venue": "123"})
+
+    s3.delete_object(Bucket=bucket, Key=key)
+    s3.delete_bucket(Bucket=bucket)

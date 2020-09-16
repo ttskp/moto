@@ -212,6 +212,24 @@ def test_delete_secret_force():
 
 
 @mock_secretsmanager
+def test_delete_secret_force_with_arn():
+    conn = boto3.client("secretsmanager", region_name="us-west-2")
+
+    create_secret = conn.create_secret(Name="test-secret", SecretString="foosecret")
+
+    result = conn.delete_secret(
+        SecretId=create_secret["ARN"], ForceDeleteWithoutRecovery=True
+    )
+
+    assert result["ARN"]
+    assert result["DeletionDate"] > datetime.fromtimestamp(1, pytz.utc)
+    assert result["Name"] == "test-secret"
+
+    with assert_raises(ClientError):
+        result = conn.get_secret_value(SecretId="test-secret")
+
+
+@mock_secretsmanager
 def test_delete_secret_that_does_not_exist():
     conn = boto3.client("secretsmanager", region_name="us-west-2")
 
@@ -320,6 +338,7 @@ def test_get_random_exclude_characters_and_symbols():
         PasswordLength=20, ExcludeCharacters="xyzDje@?!."
     )
     assert any(c in "xyzDje@?!." for c in random_password["RandomPassword"]) == False
+    assert len(random_password["RandomPassword"]) == 20
 
 
 @mock_secretsmanager
@@ -439,36 +458,6 @@ def test_describe_secret_that_does_not_match():
 
     with assert_raises(ClientError):
         result = conn.get_secret_value(SecretId="i-dont-match")
-
-
-@mock_secretsmanager
-def test_list_secrets_empty():
-    conn = boto3.client("secretsmanager", region_name="us-west-2")
-
-    secrets = conn.list_secrets()
-
-    assert secrets["SecretList"] == []
-
-
-@mock_secretsmanager
-def test_list_secrets():
-    conn = boto3.client("secretsmanager", region_name="us-west-2")
-
-    conn.create_secret(Name="test-secret", SecretString="foosecret")
-
-    conn.create_secret(
-        Name="test-secret-2",
-        SecretString="barsecret",
-        Tags=[{"Key": "a", "Value": "1"}],
-    )
-
-    secrets = conn.list_secrets()
-
-    assert secrets["SecretList"][0]["ARN"] is not None
-    assert secrets["SecretList"][0]["Name"] == "test-secret"
-    assert secrets["SecretList"][1]["ARN"] is not None
-    assert secrets["SecretList"][1]["Name"] == "test-secret-2"
-    assert secrets["SecretList"][1]["Tags"] == [{"Key": "a", "Value": "1"}]
 
 
 @mock_secretsmanager
@@ -733,25 +722,33 @@ def test_put_secret_value_versions_differ_if_same_secret_put_twice():
 def test_put_secret_value_maintains_description_and_tags():
     conn = boto3.client("secretsmanager", region_name="us-west-2")
 
-    conn.create_secret(
+    previous_response = conn.create_secret(
         Name=DEFAULT_SECRET_NAME,
         SecretString="foosecret",
         Description="desc",
         Tags=[{"Key": "Foo", "Value": "Bar"}, {"Key": "Mykey", "Value": "Myvalue"}],
     )
+    previous_version_id = previous_response["VersionId"]
 
     conn = boto3.client("secretsmanager", region_name="us-west-2")
-    conn.put_secret_value(
+    current_response = conn.put_secret_value(
         SecretId=DEFAULT_SECRET_NAME,
         SecretString="dupe_secret",
         VersionStages=["AWSCURRENT"],
     )
+    current_version_id = current_response["VersionId"]
+
     secret_details = conn.describe_secret(SecretId=DEFAULT_SECRET_NAME)
     assert secret_details["Tags"] == [
         {"Key": "Foo", "Value": "Bar"},
         {"Key": "Mykey", "Value": "Myvalue"},
     ]
     assert secret_details["Description"] == "desc"
+    assert secret_details["VersionIdsToStages"] is not None
+    assert previous_version_id in secret_details["VersionIdsToStages"]
+    assert current_version_id in secret_details["VersionIdsToStages"]
+    assert secret_details["VersionIdsToStages"][previous_version_id] == ["AWSPREVIOUS"]
+    assert secret_details["VersionIdsToStages"][current_version_id] == ["AWSCURRENT"]
 
 
 @mock_secretsmanager

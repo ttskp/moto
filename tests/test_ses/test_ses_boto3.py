@@ -85,6 +85,35 @@ def test_send_email():
 
 
 @mock_ses
+def test_send_email_when_verify_source():
+    conn = boto3.client("ses", region_name="us-east-1")
+
+    kwargs = dict(
+        Destination={"ToAddresses": ["test_to@example.com"],},
+        Message={
+            "Subject": {"Data": "test subject"},
+            "Body": {"Text": {"Data": "test body"}},
+        },
+    )
+
+    conn.send_email.when.called_with(
+        Source="verify_email_address@example.com", **kwargs
+    ).should.throw(ClientError)
+    conn.verify_email_address(EmailAddress="verify_email_address@example.com")
+    conn.send_email(Source="verify_email_address@example.com", **kwargs)
+
+    conn.send_email.when.called_with(
+        Source="verify_email_identity@example.com", **kwargs
+    ).should.throw(ClientError)
+    conn.verify_email_identity(EmailAddress="verify_email_identity@example.com")
+    conn.send_email(Source="verify_email_identity@example.com", **kwargs)
+
+    send_quota = conn.get_send_quota()
+    sent_count = int(send_quota["SentLast24Hours"])
+    sent_count.should.equal(2)
+
+
+@mock_ses
 def test_send_templated_email():
     conn = boto3.client("ses", region_name="us-east-1")
 
@@ -298,6 +327,118 @@ def test_create_configuration_set():
         )
 
     ex.exception.response["Error"]["Code"].should.equal("EventDestinationAlreadyExists")
+
+
+@mock_ses
+def test_create_receipt_rule_set():
+    conn = boto3.client("ses", region_name="us-east-1")
+    result = conn.create_receipt_rule_set(RuleSetName="testRuleSet")
+
+    result["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+
+    with assert_raises(ClientError) as ex:
+        conn.create_receipt_rule_set(RuleSetName="testRuleSet")
+
+    ex.exception.response["Error"]["Code"].should.equal("RuleSetNameAlreadyExists")
+
+
+@mock_ses
+def test_create_receipt_rule():
+    conn = boto3.client("ses", region_name="us-east-1")
+    rule_set_name = "testRuleSet"
+    conn.create_receipt_rule_set(RuleSetName=rule_set_name)
+
+    result = conn.create_receipt_rule(
+        RuleSetName=rule_set_name,
+        Rule={
+            "Name": "testRule",
+            "Enabled": False,
+            "TlsPolicy": "Optional",
+            "Recipients": ["string"],
+            "Actions": [
+                {
+                    "S3Action": {
+                        "TopicArn": "string",
+                        "BucketName": "string",
+                        "ObjectKeyPrefix": "string",
+                        "KmsKeyArn": "string",
+                    },
+                    "BounceAction": {
+                        "TopicArn": "string",
+                        "SmtpReplyCode": "string",
+                        "StatusCode": "string",
+                        "Message": "string",
+                        "Sender": "string",
+                    },
+                }
+            ],
+            "ScanEnabled": False,
+        },
+    )
+
+    result["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+
+    with assert_raises(ClientError) as ex:
+        conn.create_receipt_rule(
+            RuleSetName=rule_set_name,
+            Rule={
+                "Name": "testRule",
+                "Enabled": False,
+                "TlsPolicy": "Optional",
+                "Recipients": ["string"],
+                "Actions": [
+                    {
+                        "S3Action": {
+                            "TopicArn": "string",
+                            "BucketName": "string",
+                            "ObjectKeyPrefix": "string",
+                            "KmsKeyArn": "string",
+                        },
+                        "BounceAction": {
+                            "TopicArn": "string",
+                            "SmtpReplyCode": "string",
+                            "StatusCode": "string",
+                            "Message": "string",
+                            "Sender": "string",
+                        },
+                    }
+                ],
+                "ScanEnabled": False,
+            },
+        )
+
+    ex.exception.response["Error"]["Code"].should.equal("RuleAlreadyExists")
+
+    with assert_raises(ClientError) as ex:
+        conn.create_receipt_rule(
+            RuleSetName="InvalidRuleSetaName",
+            Rule={
+                "Name": "testRule",
+                "Enabled": False,
+                "TlsPolicy": "Optional",
+                "Recipients": ["string"],
+                "Actions": [
+                    {
+                        "S3Action": {
+                            "TopicArn": "string",
+                            "BucketName": "string",
+                            "ObjectKeyPrefix": "string",
+                            "KmsKeyArn": "string",
+                        },
+                        "BounceAction": {
+                            "TopicArn": "string",
+                            "SmtpReplyCode": "string",
+                            "StatusCode": "string",
+                            "Message": "string",
+                            "Sender": "string",
+                        },
+                    }
+                ],
+                "ScanEnabled": False,
+            },
+        )
+
+    ex.exception.response["Error"]["Code"].should.equal("RuleSetDoesNotExist")
 
 
 @mock_ses

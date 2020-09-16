@@ -3,7 +3,7 @@ import json
 from boto3 import Session
 
 from moto.core.utils import iso_8601_datetime_without_milliseconds
-from moto.core import BaseBackend, BaseModel
+from moto.core import BaseBackend, BaseModel, CloudFormationModel
 from moto.core.exceptions import RESTError
 from moto.logs import logs_backends
 from datetime import datetime, timedelta
@@ -305,6 +305,13 @@ class CloudWatchBackend(BaseBackend):
 
     def delete_alarms(self, alarm_names):
         for alarm_name in alarm_names:
+            if alarm_name not in self.alarms:
+                raise RESTError(
+                    "ResourceNotFound",
+                    "Alarm {0} not found".format(alarm_name),
+                    status=404,
+                )
+        for alarm_name in alarm_names:
             self.alarms.pop(alarm_name, None)
 
     def put_metric_data(self, namespace, metric_data):
@@ -483,22 +490,30 @@ class CloudWatchBackend(BaseBackend):
             return None, metrics
 
 
-class LogGroup(BaseModel):
+class LogGroup(CloudFormationModel):
     def __init__(self, spec):
         # required
         self.name = spec["LogGroupName"]
         # optional
         self.tags = spec.get("Tags", [])
 
+    @staticmethod
+    def cloudformation_name_type():
+        return "LogGroupName"
+
+    @staticmethod
+    def cloudformation_type():
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-logs-loggroup.html
+        return "AWS::Logs::LogGroup"
+
     @classmethod
     def create_from_cloudformation_json(
         cls, resource_name, cloudformation_json, region_name
     ):
         properties = cloudformation_json["Properties"]
-        log_group_name = properties["LogGroupName"]
         tags = properties.get("Tags", {})
         return logs_backends[region_name].create_log_group(
-            log_group_name, tags, **properties
+            resource_name, tags, **properties
         )
 
 

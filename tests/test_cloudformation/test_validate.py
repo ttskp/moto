@@ -5,6 +5,7 @@ import os
 import boto3
 from nose.tools import raises
 import botocore
+import sure  # noqa
 
 
 from moto.cloudformation.exceptions import ValidationError
@@ -39,6 +40,16 @@ json_template = {
     },
 }
 
+json_valid_template_with_tabs = """
+{
+\t"AWSTemplateFormatVersion": "2010-09-09",
+\t"Description": "Stack 2",
+\t"Resources": {
+\t\t"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"VisibilityTimeout": 60}}
+\t}
+}
+"""
+
 # One resource is required
 json_bad_template = {"AWSTemplateFormatVersion": "2010-09-09", "Description": "Stack 1"}
 
@@ -51,6 +62,15 @@ def test_boto3_json_validate_successful():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
     response = cf_conn.validate_template(TemplateBody=dummy_template_json)
     assert response["Description"] == "Stack 1"
+    assert response["Parameters"] == []
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+
+@mock_cloudformation
+def test_boto3_json_with_tabs_validate_successful():
+    cf_conn = boto3.client("cloudformation", region_name="us-east-1")
+    response = cf_conn.validate_template(TemplateBody=json_valid_template_with_tabs)
+    assert response["Description"] == "Stack 2"
     assert response["Parameters"] == []
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
@@ -90,6 +110,25 @@ yaml_bad_template = """
 def test_boto3_yaml_validate_successful():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
     response = cf_conn.validate_template(TemplateBody=yaml_template)
+    assert response["Description"] == "Simple CloudFormation Test Template"
+    assert response["Parameters"] == []
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+
+@mock_cloudformation
+@mock_s3
+def test_boto3_yaml_validate_template_url_successful():
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3_conn = boto3.resource("s3", region_name="us-east-1")
+    s3_conn.create_bucket(Bucket="foobar")
+
+    s3_conn.Object("foobar", "template-key").put(Body=yaml_template)
+    key_url = s3.generate_presigned_url(
+        ClientMethod="get_object", Params={"Bucket": "foobar", "Key": "template-key"}
+    )
+
+    cf_conn = boto3.client("cloudformation", region_name="us-east-1")
+    response = cf_conn.validate_template(TemplateURL=key_url)
     assert response["Description"] == "Simple CloudFormation Test Template"
     assert response["Parameters"] == []
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200

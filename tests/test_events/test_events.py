@@ -4,6 +4,7 @@ import unittest
 
 import boto3
 import sure  # noqa
+
 from botocore.exceptions import ClientError
 from nose.tools import assert_raises
 
@@ -202,6 +203,35 @@ def test_remove_targets():
 
 
 @mock_events
+def test_put_targets():
+    client = boto3.client("events", "us-west-2")
+    rule_name = "my-event"
+    rule_data = {
+        "Name": rule_name,
+        "ScheduleExpression": "rate(5 minutes)",
+        "EventPattern": '{"source": ["test-source"]}',
+    }
+
+    client.put_rule(**rule_data)
+
+    targets = client.list_targets_by_rule(Rule=rule_name)["Targets"]
+    targets_before = len(targets)
+    assert targets_before == 0
+
+    targets_data = [{"Arn": "test_arn", "Id": "test_id"}]
+    resp = client.put_targets(Rule=rule_name, Targets=targets_data)
+    assert resp["FailedEntryCount"] == 0
+    assert len(resp["FailedEntries"]) == 0
+
+    targets = client.list_targets_by_rule(Rule=rule_name)["Targets"]
+    targets_after = len(targets)
+    assert targets_before + 1 == targets_after
+
+    assert targets[0]["Arn"] == "test_arn"
+    assert targets[0]["Id"] == "test_id"
+
+
+@mock_events
 def test_permissions():
     client = boto3.client("events", "eu-central-1")
 
@@ -282,8 +312,10 @@ def test_put_events():
         "DetailType": "myDetailType",
     }
 
-    client.put_events(Entries=[event])
+    response = client.put_events(Entries=[event])
     # Boto3 would error if it didn't return 200 OK
+    response["FailedEntryCount"].should.equal(0)
+    response["Entries"].should.have.length_of(1)
 
     with assert_raises(ClientError):
         client.put_events(Entries=[event] * 20)

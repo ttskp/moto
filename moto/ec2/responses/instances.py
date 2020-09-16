@@ -13,6 +13,7 @@ from moto.elbv2 import elbv2_backends
 from moto.core import ACCOUNT_ID
 
 from copy import deepcopy
+import six
 
 
 class InstanceResponse(BaseResponse):
@@ -283,15 +284,15 @@ class InstanceResponse(BaseResponse):
             device_template["Ebs"]["VolumeSize"] = device_mapping.get(
                 "ebs._volume_size"
             )
-            device_template["Ebs"]["DeleteOnTermination"] = device_mapping.get(
-                "ebs._delete_on_termination", False
+            device_template["Ebs"]["DeleteOnTermination"] = self._convert_to_bool(
+                device_mapping.get("ebs._delete_on_termination", False)
             )
             device_template["Ebs"]["VolumeType"] = device_mapping.get(
                 "ebs._volume_type"
             )
             device_template["Ebs"]["Iops"] = device_mapping.get("ebs._iops")
-            device_template["Ebs"]["Encrypted"] = device_mapping.get(
-                "ebs._encrypted", False
+            device_template["Ebs"]["Encrypted"] = self._convert_to_bool(
+                device_mapping.get("ebs._encrypted", False)
             )
             mappings.append(device_template)
 
@@ -307,6 +308,16 @@ class InstanceResponse(BaseResponse):
             and "ebs._snapshot_id" not in device_mapping
         ):
             raise MissingParameterError("size or snapshotId")
+
+    @staticmethod
+    def _convert_to_bool(bool_str):
+        if isinstance(bool_str, bool):
+            return bool_str
+
+        if isinstance(bool_str, six.text_type):
+            return str(bool_str).lower() == "true"
+
+        return False
 
 
 BLOCK_DEVICE_MAPPING_TEMPLATE = {
@@ -807,13 +818,25 @@ EC2_DESCRIBE_INSTANCE_TYPES = """<?xml version="1.0" encoding="UTF-8"?>
     <instanceTypeSet>
     {% for instance_type in instance_types %}
         <item>
-            <name>{{ instance_type.name }}</name>
-            <vcpu>{{ instance_type.cores }}</vcpu>
-            <memory>{{ instance_type.memory }}</memory>
-            <storageSize>{{ instance_type.disk }}</storageSize>
-            <storageCount>{{ instance_type.storageCount }}</storageCount>
-            <maxIpAddresses>{{ instance_type.maxIpAddresses }}</maxIpAddresses>
-            <ebsOptimizedAvailable>{{ instance_type.ebsOptimizedAvailable }}</ebsOptimizedAvailable>
+            <instanceType>{{ instance_type.name }}</instanceType>
+            <vCpuInfo>
+                <defaultVCpus>{{ instance_type.cores }}</defaultVCpus>
+                <defaultCores>{{ instance_type.cores }}</defaultCores>
+                <defaultThreadsPerCore>1</defaultThreadsPerCore>
+            </vCpuInfo>
+            <memoryInfo>
+                <sizeInMiB>{{ instance_type.memory }}</sizeInMiB>
+            </memoryInfo>
+            <instanceStorageInfo>
+                <totalSizeInGB>{{ instance_type.disk }}</totalSizeInGB>
+            </instanceStorageInfo>
+            <processorInfo>
+                <supportedArchitectures>
+                    <item>
+                        x86_64
+                    </item>
+                </supportedArchitectures>
+            </processorInfo>
         </item>
     {% endfor %}
     </instanceTypeSet>

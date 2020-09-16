@@ -305,6 +305,13 @@ class IamResponse(BaseResponse):
         template = self.response_template(CREATE_INSTANCE_PROFILE_TEMPLATE)
         return template.render(profile=profile)
 
+    def delete_instance_profile(self):
+        profile_name = self._get_param("InstanceProfileName")
+
+        profile = iam_backend.delete_instance_profile(profile_name)
+        template = self.response_template(DELETE_INSTANCE_PROFILE_TEMPLATE)
+        return template.render(profile=profile)
+
     def get_instance_profile(self):
         profile_name = self._get_param("InstanceProfileName")
         profile = iam_backend.get_instance_profile(profile_name)
@@ -330,7 +337,6 @@ class IamResponse(BaseResponse):
 
     def list_roles(self):
         roles = iam_backend.get_roles()
-
         template = self.response_template(LIST_ROLES_TEMPLATE)
         return template.render(roles=roles)
 
@@ -1179,6 +1185,12 @@ CREATE_INSTANCE_PROFILE_TEMPLATE = """<CreateInstanceProfileResponse xmlns="http
     <RequestId>974142ee-99f1-11e1-a4c3-27EXAMPLE804</RequestId>
   </ResponseMetadata>
 </CreateInstanceProfileResponse>"""
+
+DELETE_INSTANCE_PROFILE_TEMPLATE = """<DeleteInstanceProfileResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ResponseMetadata>
+    <RequestId>786dff92-6cfd-4fa4-b1eb-27EXAMPLE804</RequestId>
+  </ResponseMetadata>
+</DeleteInstanceProfileResponse>"""
 
 GET_INSTANCE_PROFILE_TEMPLATE = """<GetInstanceProfileResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <GetInstanceProfileResult>
@@ -2070,6 +2082,16 @@ GET_ACCOUNT_AUTHORIZATION_DETAILS_TEMPLATE = """<GetAccountAuthorizationDetailsR
         <UserName>{{ user.name }}</UserName>
         <Arn>{{ user.arn }}</Arn>
         <CreateDate>{{ user.created_iso_8601 }}</CreateDate>
+        {% if user.policies %}
+        <UserPolicyList>
+        {% for policy in user.policies %}
+            <member>
+                <PolicyName>{{ policy }}</PolicyName>
+                <PolicyDocument>{{ user.policies[policy] }}</PolicyDocument>
+            </member>
+        {% endfor %}
+        </UserPolicyList>
+        {% endif %}
       </member>
     {% endfor %}
     </UserDetailList>
@@ -2093,7 +2115,7 @@ GET_ACCOUNT_AUTHORIZATION_DETAILS_TEMPLATE = """<GetAccountAuthorizationDetailsR
         {% for policy in group.policies %}
             <member>
                 <PolicyName>{{ policy }}</PolicyName>
-                <PolicyDocument>{{ group.get_policy(policy) }}</PolicyDocument>
+                <PolicyDocument>{{ group.policies[policy] }}</PolicyDocument>
             </member>
         {% endfor %}
         </GroupPolicyList>
@@ -2400,9 +2422,7 @@ GET_ACCOUNT_PASSWORD_POLICY_TEMPLATE = """<GetAccountPasswordPolicyResponse xmln
     <PasswordPolicy>
       <AllowUsersToChangePassword>{{ password_policy.allow_users_to_change_password | lower }}</AllowUsersToChangePassword>
       <ExpirePasswords>{{ password_policy.expire_passwords | lower }}</ExpirePasswords>
-      {% if password_policy.hard_expiry %}
       <HardExpiry>{{ password_policy.hard_expiry | lower }}</HardExpiry>
-      {% endif %}
       {% if password_policy.max_password_age %}
       <MaxPasswordAge>{{ password_policy.max_password_age }}</MaxPasswordAge>
       {% endif %}

@@ -1,7 +1,6 @@
 from __future__ import unicode_literals
 import json
 
-import base64
 from decimal import Decimal
 
 import boto
@@ -18,6 +17,7 @@ import boto.sqs
 import boto.vpc
 import boto3
 import sure  # noqa
+from string import Template
 
 from moto import (
     mock_autoscaling_deprecated,
@@ -28,7 +28,6 @@ from moto import (
     mock_dynamodb2,
     mock_ec2,
     mock_ec2_deprecated,
-    mock_elb,
     mock_elb_deprecated,
     mock_events,
     mock_iam_deprecated,
@@ -37,18 +36,14 @@ from moto import (
     mock_logs,
     mock_rds_deprecated,
     mock_rds2,
-    mock_rds2_deprecated,
-    mock_redshift,
     mock_redshift_deprecated,
     mock_route53_deprecated,
     mock_s3,
     mock_sns_deprecated,
-    mock_sqs,
     mock_sqs_deprecated,
     mock_elbv2,
 )
 from moto.core import ACCOUNT_ID
-from moto.dynamodb2.models import Table
 
 from tests.test_cloudformation.fixtures import (
     ec2_classic_eip,
@@ -1782,6 +1777,7 @@ def lambda_handler(event, context):
                     "Role": {"Fn::GetAtt": ["MyRole", "Arn"]},
                     "Runtime": "python2.7",
                     "Environment": {"Variables": {"TEST_ENV_KEY": "test-env-val"}},
+                    "ReservedConcurrentExecutions": 10,
                 },
             },
             "MyRole": {
@@ -1815,6 +1811,11 @@ def lambda_handler(event, context):
     result["Functions"][0]["Environment"].should.equal(
         {"Variables": {"TEST_ENV_KEY": "test-env-val"}}
     )
+
+    function_name = result["Functions"][0]["FunctionName"]
+    result = conn.get_function(FunctionName=function_name)
+
+    result["Concurrency"]["ReservedConcurrentExecutions"].should.equal(10)
 
 
 @mock_cloudformation
@@ -2308,6 +2309,7 @@ def test_stack_dynamodb_resources_integration():
                             },
                         }
                     ],
+                    "StreamSpecification": {"StreamViewType": "KEYS_ONLY"},
                 },
             }
         },
@@ -2318,6 +2320,12 @@ def test_stack_dynamodb_resources_integration():
     cfn_conn = boto3.client("cloudformation", "us-east-1")
     cfn_conn.create_stack(
         StackName="dynamodb_stack", TemplateBody=dynamodb_template_json
+    )
+
+    dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+    table_desc = dynamodb_client.describe_table(TableName="myTableName")["Table"]
+    table_desc["StreamSpecification"].should.equal(
+        {"StreamEnabled": True, "StreamViewType": "KEYS_ONLY",}
     )
 
     dynamodb_conn = boto3.resource("dynamodb", region_name="us-east-1")
@@ -2500,6 +2508,45 @@ def test_stack_events_create_rule_as_target():
 
 
 @mock_cloudformation
+@mock_events
+def test_stack_events_update_rule_integration():
+    events_template = Template(
+        """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Event": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "Name": "$Name",
+                    "State": "$State",
+                    "ScheduleExpression": "rate(5 minutes)",
+                },
+            }
+        },
+    } """
+    )
+
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+
+    original_template = events_template.substitute(Name="Foo", State="ENABLED")
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=original_template)
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+    rules["Rules"].should.have.length_of(1)
+    rules["Rules"][0]["Name"].should.equal("Foo")
+    rules["Rules"][0]["State"].should.equal("ENABLED")
+
+    update_template = events_template.substitute(Name="Bar", State="DISABLED")
+    cf_conn.update_stack(StackName="test_stack", TemplateBody=update_template)
+
+    rules = boto3.client("events", "us-west-2").list_rules()
+
+    rules["Rules"].should.have.length_of(1)
+    rules["Rules"][0]["Name"].should.equal("Bar")
+    rules["Rules"][0]["State"].should.equal("DISABLED")
+
+
+@mock_cloudformation
 @mock_autoscaling
 def test_autoscaling_propagate_tags():
     autoscaling_group_with_tags = {
@@ -2551,3 +2598,214 @@ def test_autoscaling_propagate_tags():
 
     assert propagation_dict["test-key-propagate"]
     assert not propagation_dict["test-key-no-propagate"]
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_eventbus_create_from_cfn_integration():
+    eventbus_template = """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "EventBus": {
+                "Type": "AWS::Events::EventBus",
+                "Properties": {
+                    "Name": "MyCustomEventBus"
+                },
+            }
+        },
+    }"""
+
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=eventbus_template)
+
+    event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="MyCustom"
+    )
+
+    event_buses["EventBuses"].should.have.length_of(1)
+    event_buses["EventBuses"][0]["Name"].should.equal("MyCustomEventBus")
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_delete_eventbus_integration():
+    eventbus_template = """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "EventBus": {
+                "Type": "AWS::Events::EventBus",
+                "Properties": {
+                    "Name": "MyCustomEventBus"
+                },
+            }
+        },
+    }"""
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=eventbus_template)
+
+    event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="MyCustom"
+    )
+    event_buses["EventBuses"].should.have.length_of(1)
+
+    cf_conn.delete_stack(StackName="test_stack")
+
+    event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="MyCustom"
+    )
+    event_buses["EventBuses"].should.have.length_of(0)
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_delete_from_cfn_integration():
+    eventbus_template = Template(
+        """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "$resource_name": {
+                "Type": "AWS::Events::EventBus",
+                "Properties": {
+                    "Name": "$name"
+                },
+            }
+        },
+    }"""
+    )
+
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+
+    original_template = eventbus_template.substitute(
+        {"resource_name": "original", "name": "MyCustomEventBus"}
+    )
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=original_template)
+
+    original_event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="MyCustom"
+    )
+    original_event_buses["EventBuses"].should.have.length_of(1)
+
+    original_eventbus = original_event_buses["EventBuses"][0]
+
+    updated_template = eventbus_template.substitute(
+        {"resource_name": "updated", "name": "AnotherEventBus"}
+    )
+    cf_conn.update_stack(StackName="test_stack", TemplateBody=updated_template)
+
+    update_event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="AnotherEventBus"
+    )
+    update_event_buses["EventBuses"].should.have.length_of(1)
+    update_event_buses["EventBuses"][0]["Arn"].shouldnt.equal(original_eventbus["Arn"])
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_update_from_cfn_integration():
+    eventbus_template = Template(
+        """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "EventBus": {
+                "Type": "AWS::Events::EventBus",
+                "Properties": {
+                    "Name": "$name"
+                },
+            }
+        },
+    }"""
+    )
+
+    cf_conn = boto3.client("cloudformation", "us-west-2")
+
+    original_template = eventbus_template.substitute({"name": "MyCustomEventBus"})
+    cf_conn.create_stack(StackName="test_stack", TemplateBody=original_template)
+
+    original_event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="MyCustom"
+    )
+    original_event_buses["EventBuses"].should.have.length_of(1)
+
+    original_eventbus = original_event_buses["EventBuses"][0]
+
+    updated_template = eventbus_template.substitute({"name": "NewEventBus"})
+    cf_conn.update_stack(StackName="test_stack", TemplateBody=updated_template)
+
+    update_event_buses = boto3.client("events", "us-west-2").list_event_buses(
+        NamePrefix="NewEventBus"
+    )
+    update_event_buses["EventBuses"].should.have.length_of(1)
+    update_event_buses["EventBuses"][0]["Name"].should.equal("NewEventBus")
+    update_event_buses["EventBuses"][0]["Arn"].shouldnt.equal(original_eventbus["Arn"])
+
+
+@mock_cloudformation
+@mock_events
+def test_stack_events_get_attribute_integration():
+    eventbus_template = """{
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "EventBus": {
+                "Type": "AWS::Events::EventBus",
+                "Properties": {
+                    "Name": "MyEventBus"
+                },
+            }
+        },
+        "Outputs": {
+            "bus_arn": {"Value": {"Fn::GetAtt": ["EventBus", "Arn"]}},
+            "bus_name": {"Value": {"Fn::GetAtt": ["EventBus", "Name"]}},
+        }
+    }"""
+
+    cf = boto3.client("cloudformation", "us-west-2")
+    events = boto3.client("events", "us-west-2")
+
+    cf.create_stack(StackName="test_stack", TemplateBody=eventbus_template)
+
+    stack = cf.describe_stacks(StackName="test_stack")["Stacks"][0]
+    outputs = stack["Outputs"]
+
+    output_arn = list(filter(lambda item: item["OutputKey"] == "bus_arn", outputs))[0]
+    output_name = list(filter(lambda item: item["OutputKey"] == "bus_name", outputs))[0]
+
+    event_bus = events.list_event_buses(NamePrefix="MyEventBus")["EventBuses"][0]
+
+    output_arn["OutputValue"].should.equal(event_bus["Arn"])
+    output_name["OutputValue"].should.equal(event_bus["Name"])
+
+
+@mock_cloudformation
+@mock_dynamodb2
+def test_dynamodb_table_creation():
+    CFN_TEMPLATE = {
+        "Outputs": {"MyTableName": {"Value": {"Ref": "MyTable"}},},
+        "Resources": {
+            "MyTable": {
+                "Type": "AWS::DynamoDB::Table",
+                "Properties": {
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "id", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                },
+            },
+        },
+    }
+    stack_name = "foobar"
+    cfn = boto3.client("cloudformation", "us-west-2")
+    cfn.create_stack(StackName=stack_name, TemplateBody=json.dumps(CFN_TEMPLATE))
+    # Wait until moto creates the stack
+    waiter = cfn.get_waiter("stack_create_complete")
+    waiter.wait(StackName=stack_name)
+    # Verify the TableName is part of the outputs
+    stack = cfn.describe_stacks(StackName=stack_name)["Stacks"][0]
+    outputs = stack["Outputs"]
+    outputs.should.have.length_of(1)
+    outputs[0]["OutputKey"].should.equal("MyTableName")
+    outputs[0]["OutputValue"].should.contain("foobar")
+    # Assert the table is created
+    ddb = boto3.client("dynamodb", "us-west-2")
+    table_names = ddb.list_tables()["TableNames"]
+    table_names.should.equal([outputs[0]["OutputValue"]])
